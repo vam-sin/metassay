@@ -1,5 +1,8 @@
 data_processing/encode_dataset
 encode_embeds/data
 encode_embeds/outputs
+models/saved_models
+models/wandb
+models/api_keys.json
 __pycache__
 .cache

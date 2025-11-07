@@ -1,3 +1,11 @@
+# libraries
+'''
+get_cutoffs.py
+script to analyse the csv files obtained from bin_stats.py to set cutoffs that would
+obtain a similar number of bins from all 3 output types. 
+downsampling is conducted so that no specific chromosome has a super high number of bins from that task. (done after setting the thresh for fc, and then pv/aln follow that)
+output: uniqueBins.npz (file that consists of all the bins that were chosen across all the 22 chromosomes)
+'''
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
@@ -34,74 +42,6 @@ print(f'Number of Tasks (PV): {len(pv_tasks)}')  # should be 68
 print(f'Number of Tasks (ALN): {len(aln_tasks)}')  # should be 67
 
 assert len(fc_tasks) + len(pv_tasks) + len(aln_tasks) == len(tasks), "Task categorization error."
-
-# means_pv = []
-# # PV processing
-# for task in tqdm(pv_tasks, desc='Processing PV tasks'):
-#     # load in all the chromosome bin stats files for this task, and get the mean +- stds for cutoff calculation
-#     for ch in chromosomes:
-#         df_file = f'encode_dataset/proc/bin_stats/{task}_{ch}.csv'
-#         if os.path.exists(df_file):
-#             df_ch = pd.read_csv(df_file)
-#             means_pv.extend(list(df_ch['mean']))
-
-# means_pv = np.array(means_pv)
-
-# print(f'PV Tasks - Overall Mean: {means_pv.mean()}, Overall Std: {means_pv.std()}. (Bins Perc Above Mean: {100 * np.sum(means_pv > means_pv.mean()) / len(means_pv):.2f}%)')
-# print(f'PV Tasks (Mean + 1*Std): {means_pv.mean() + 1 * means_pv.std()} (Bins Perc Above Cutoff: {100 * np.sum(means_pv > (means_pv.mean() + 1 * means_pv.std())) / len(means_pv):.2f}%)')
-# print(f'PV Tasks (Mean + 2*Std): {means_pv.mean() + 2 * means_pv.std()} (Bins Perc Above Cutoff: {100 * np.sum(means_pv > (means_pv.mean() + 2 * means_pv.std())) / len(means_pv):.2f}%)')
-# print(f'PV Tasks (Mean + 3*Std): {means_pv.mean() + 3 * means_pv.std()} (Bins Perc Above Cutoff: {100 * np.sum(means_pv > (means_pv.mean() + 3 * means_pv.std())) / len(means_pv):.2f}%)')
-
-# means_aln = []
-# # ALN processing
-# for task in tqdm(aln_tasks, desc='Processing ALN tasks'):
-#     # load in all the chromosome bin stats files for this task, and get the mean +- stds for cutoff calculation
-#     for ch in chromosomes:
-#         df_file = f'encode_dataset/proc/bin_stats/{task}_{ch}.csv'
-#         if os.path.exists(df_file):
-#             df_ch = pd.read_csv(df_file)
-#             means_aln.extend(list(df_ch['mean']))
-
-# means_aln = np.array(means_aln)
-
-# print(f'ALN Tasks - Overall Mean: {means_aln.mean()}, Overall Std: {means_aln.std()}. (Bins Perc Above Mean: {100 * np.sum(means_aln > means_aln.mean()) / len(means_aln):.2f}%)')
-# print(f'ALN Tasks (Mean + 1*Std): {means_aln.mean() + 1 * means_aln.std()} (Bins Perc Above Cutoff: {100 * np.sum(means_aln > (means_aln.mean() + 1 * means_aln.std())) / len(means_aln):.2f}%)')
-# print(f'ALN Tasks (Mean + 2*Std): {means_aln.mean() + 2 * means_aln.std()} (Bins Perc Above Cutoff: {100 * np.sum(means_aln > (means_aln.mean() + 2 * means_aln.std())) / len(means_aln):.2f}%)')
-# print(f'ALN Tasks (Mean + 3*Std): {means_aln.mean() + 3 * means_aln.std()} (Bins Perc Above Cutoff: {100 * np.sum(means_aln > (means_aln.mean() + 3 * means_aln.std())) / len(means_aln):.2f}%)')
-
-# means_fc = []
-# # FC processing
-# for task in tqdm(fc_tasks, desc='Processing FC tasks'):
-#     # load in all the chromosome bin stats files for this task, and get the mean +- stds for cutoff calculation
-#     for ch in chromosomes:
-#         df_file = f'encode_dataset/proc/bin_stats/{task}_{ch}.csv'
-#         if os.path.exists(df_file):
-#             df_ch = pd.read_csv(df_file)
-#             means_fc.extend(list(df_ch['mean']))
-
-# means_fc = np.array(means_fc)
-
-# print(f'FC Tasks - Overall Mean: {means_fc.mean()}, Overall Std: {means_fc.std()}. (Bins Perc Above Mean: {100 * np.sum(means_fc > means_fc.mean()) / len(means_fc):.2f}%)')
-# print(f'FC Tasks (Mean + 1*Std): {means_fc.mean() + 1 * means_fc.std()} (Bins Perc Above Cutoff: {100 * np.sum(means_fc > (means_fc.mean() + 1 * means_fc.std())) / len(means_fc):.2f}%)')
-# print(f'FC Tasks (Mean + 2*Std): {means_fc.mean() + 2 * means_fc.std()} (Bins Perc Above Cutoff: {100 * np.sum(means_fc > (means_fc.mean() + 2 * means_fc.std())) / len(means_fc):.2f}%)')
-# print(f'FC Tasks (Mean + 3*Std): {means_fc.mean() + 3 * means_fc.std()} (Bins Perc Above Cutoff: {100 * np.sum(means_fc > (means_fc.mean() + 3 * means_fc.std())) / len(means_fc):.2f}%)')
-
-'''
-FC Tasks - Overall Mean: 0.6233088767015336, Overall Std: 1.1291127701216044
-FC Tasks (Mean + 1*Std): 1.752421646823138 (Bins Perc Above Cutoff: 3.51%)
-FC Tasks (Mean + 2*Std): 2.881534416944742 (Bins Perc Above Cutoff: 1.54%)
-FC Tasks (Mean + 3*Std): 4.010647187066347 (Bins Perc Above Cutoff: 0.90%)
-
-PV Tasks - Overall Mean: 0.7049074885691617, Overall Std: 10.938644432346093. (Bins Perc Above Mean: 7.46%)
-PV Tasks (Mean + 1*Std): 11.643551920915256 (Bins Perc Above Cutoff: 0.69%)
-PV Tasks (Mean + 2*Std): 22.58219635326135 (Bins Perc Above Cutoff: 0.38%)
-PV Tasks (Mean + 3*Std): 33.52084078560744 (Bins Perc Above Cutoff: 0.26%)
-
-ALN Tasks - Overall Mean: 1.0188139424530114, Overall Std: 5.983112741975139. (Bins Perc Above Mean: 10.20%)
-ALN Tasks (Mean + 1*Std): 7.001926684428151 (Bins Perc Above Cutoff: 0.01%)
-ALN Tasks (Mean + 2*Std): 12.98503942640329 (Bins Perc Above Cutoff: 0.00%)
-ALN Tasks (Mean + 3*Std): 18.968152168378428 (Bins Perc Above Cutoff: 0.00%)
-'''
 
 cutoffs = {
     'fc': {'mean': 0.6233088767015336, 'std': 1.1291127701216044},

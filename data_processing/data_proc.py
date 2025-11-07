@@ -8,8 +8,8 @@ import time
 from utils import seq_loader
 
 chromosomes = ['chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr8', 'chr9', 'chr10', 'chr11', 'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 'chr20', 'chr21', 'chr22']
-in_size = 2048
-out_size = 1024
+# in_size = 2048
+# out_size = 1024
 num_task = 198
 
 # data stats
@@ -36,7 +36,7 @@ for chrom in chromosomes:
 
 bw_file.close()
 
-bin_regions = np.load('encode_dataset/proc/uniqueBins.npz', allow_pickle=True)['bins'].astype(str)
+bin_regions = np.load('encode_dataset/proc_3k/uniqueBins.npz', allow_pickle=True)['bins'].astype(str)
 
 print(f'Number of Unique Bin Regions: {len(bin_regions)}')
 
@@ -51,7 +51,7 @@ def load_signal_in_chunks(bw_file, chrom, length, chunk_size=10_000_000):
 def process_file_values(key, chromosomes, chromosome_lengths):
     bw_file = pyBigWig.open(key)
     task = os.path.basename(key)
-    seqloader_instance = seq_loader('hg38', 2048)
+    seqloader_instance = seq_loader('hg38', 3000) # 3k bp
     local_data = {}
     print(f'Processing file: {task}')
 
@@ -61,15 +61,22 @@ def process_file_values(key, chromosomes, chromosome_lengths):
 
         # get those in bin_regions for this chromosome
         chr_bins = [br for br in bin_regions if f'{ch}_' in br]
-        cin_starts = [int(br.split('_')[1]) for br in chr_bins]
-        cin_ends = [x + in_size for x in cin_starts]
-        cout_starts = [x + out_size // 2 for x in cin_starts]
-        cout_ends = [x + out_size for x in cout_starts]
+        starts_old = [int(br.split('_')[1]) for br in chr_bins]
+        starts = []
+        ends = []
+        for st in starts_old:
+            new_st = st - 476 # push the start back equivalently
+            new_end = new_st + 3000
+            if new_st >= 0 and new_end < length: # check that the new start and stop fall within the legal bounds for the chromosome
+                starts.append(new_st)
+                ends.append(new_end)
+            else:
+                print(f'Illegal Bin: {ch} {st}') # to be plucked out from uniqueBins.npz
 
-        for s, e, cs, ce in zip(cin_starts, cin_ends, cout_starts, cout_ends):
+        for s, e in zip(starts, ends):
             id_str = f"{ch}_{s}"
 
-            values = signal[cs:ce]
+            values = signal[s:e]
             dna_seq = seqloader_instance.get_seq_start(ch, s, '+', ohe=False)  # one-hot encoded DNA sequence
 
             local_data[id_str] = {
@@ -81,7 +88,7 @@ def process_file_values(key, chromosomes, chromosome_lengths):
     
     # save intermediate result
     print(f'Finished processing file: {task}, collected {len(local_data)} bins.')
-    np.savez(f'encode_dataset/proc/binTasks/{os.path.basename(task)}.npz', local_data)
+    np.savez(f'encode_dataset/proc_3k/binTasks/{os.path.basename(task)}.npz', local_data)
 
 # Parallelize across files
 n_jobs = 16  # adjust to CPU count
@@ -89,3 +96,8 @@ Parallel(n_jobs=n_jobs, backend="loky")(
     delayed(process_file_values)(key, chromosomes, chromosome_lengths)
     for key in tqdm(file_list)
 )
+
+'''
+input dna seq: 476, 2048, 476
+output values: 988, 1024, 988
+'''

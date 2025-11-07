@@ -1,3 +1,8 @@
+# libraries
+'''
+goes through all of the 198 tasks and does summary stats 
+at a chromosome level and saves them in individual csv files
+'''
 import pyBigWig
 import numpy as np
 import pandas as pd
@@ -116,15 +121,3 @@ Parallel(n_jobs=n_jobs, backend="loky")(
     delayed(process_file)(key, chromosomes, chromosome_lengths, out_size)
     for key in tqdm(file_list)
 )
-
-# # flatten results
-# print("Flattening results...")
-# flat_results = [r for sublist in all_results for r in sublist]
-
-# print(len(flat_results))
-
-# # save the data as a npz
-# print("Saving results...")
-# np.savez('encode_dataset/proc/data_stats.npz', flat_results)
-
-# 509184788 total segments
