@@ -7,7 +7,6 @@ import os
 from tqdm import tqdm
 import torch.nn as nn
 from torch.utils.data import Dataset
-# from torchmetrics.regression import JensenShannonDivergence
 import itertools
 import time
 import lightning as L
@@ -175,18 +174,6 @@ class MaskedPoissonLoss(nn.Module):
         loss = nn.functional.poisson_nll_loss(y_pred_mask, y_true_mask, reduction="none")
         return loss.mean()
 
-# class MaskedJSDiv(nn.Module):
-#     def __init__(self):
-#         super.__init__()
-#         jsd_func = JensenShannonDivergence()
-#     def __call__(self, y_pred, y_true, mask):
-#         y_pred_mask = torch.masked_select(y_pred, mask).float()
-#         y_true_mask = torch.masked_select(y_true, mask).float()
-
-#         jsd = jsd_func(y_pred_mask, y_true_mask)
-
-#         return jsd
-
 class MaskedMSE():
     def __init__(self):
         super().__init__()
@@ -212,8 +199,127 @@ class MaskedPearsonCorr(nn.Module):
             y_true_mask - y_true_mask.mean(),
         )
 
+class MaskedJSDiv(nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    def _kl_divergence(self, p, q, eps=1e-10):
+        p = torch.clamp(p, min=eps)
+        q = torch.clamp(q, min=eps)
+        return torch.sum(p * torch.log(p / q))
+    
+    def __call__(self, y_pred, y_true, mask, eps=1e-10):
+        # Apply mask and flatten
+        y_pred_mask = torch.masked_select(y_pred, mask).float()
+        y_true_mask = torch.masked_select(y_true, mask).float()
+        
+        # Normalize to probability distributions (ensure non-negative and sum to 1)
+        y_pred_norm = torch.clamp(y_pred_mask, min=0.0)
+        y_true_norm = torch.clamp(y_true_mask, min=0.0)
+        
+        # Normalize to sum to 1
+        pred_sum = torch.sum(y_pred_norm)
+        true_sum = torch.sum(y_true_norm)
+        
+        if pred_sum < eps or true_sum < eps:
+            # If either distribution is all zeros, return a large divergence
+            return torch.tensor(float('inf'), device=y_pred.device)
+        
+        p = y_pred_norm / pred_sum
+        q = y_true_norm / true_sum
+        
+        # Compute mixture distribution M = 0.5 * (P + Q)
+        m = 0.5 * (p + q)
+        
+        # Compute Jensen-Shannon divergence
+        kl_pm = self._kl_divergence(p, m, eps)
+        kl_qm = self._kl_divergence(q, m, eps)
+        js_div = 0.5 * kl_pm + 0.5 * kl_qm
+        
+        return js_div
+
+class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
+    """
+    Cosine annealing scheduler with linear warmup.
+    
+    Linearly increases learning rate from warmup_start_lr to base_lr during warmup_epochs,
+    then follows cosine annealing from base_lr to min_lr over the remaining epochs.
+    """
+    def __init__(self, optimizer, warmup_epochs, max_epochs, min_lr=0, warmup_start_lr=0, last_epoch=-1):
+        self.warmup_epochs = warmup_epochs
+        self.max_epochs = max_epochs
+        self.min_lr = min_lr
+        self.warmup_start_lr = warmup_start_lr
+        super().__init__(optimizer, last_epoch)
+    
+    def get_lr(self):
+        if self.last_epoch < self.warmup_epochs:
+            # Linear warmup
+            lr_scale = (self.last_epoch + 1) / self.warmup_epochs
+            return [self.warmup_start_lr + (base_lr - self.warmup_start_lr) * lr_scale 
+                    for base_lr in self.base_lrs]
+        else:
+            # Cosine annealing
+            progress = (self.last_epoch - self.warmup_epochs) / (self.max_epochs - self.warmup_epochs)
+            cosine_decay = 0.5 * (1 + np.cos(np.pi * progress))
+            return [self.min_lr + (base_lr - self.min_lr) * cosine_decay 
+                    for base_lr in self.base_lrs]
+
+class CosineAnnealingWarmRestartsScheduler(torch.optim.lr_scheduler._LRScheduler):
+    """
+    Cosine annealing scheduler with warmup and warm restarts.
+    
+    Starts with linear warmup, then follows cosine annealing with periodic restarts.
+    Each cycle consists of warmup followed by cosine decay, with cycles getting longer.
+    """
+    def __init__(self, optimizer, first_cycle_steps, cycle_mult=1.0, max_lr=None, 
+                 min_lr=0, warmup_steps=0, warmup_start_lr=0, gamma=1.0, last_epoch=-1):
+        self.first_cycle_steps = first_cycle_steps
+        self.cycle_mult = cycle_mult
+        self.max_lr = max_lr if max_lr is not None else max([group['lr'] for group in optimizer.param_groups])
+        self.min_lr = min_lr
+        self.warmup_steps = warmup_steps
+        self.warmup_start_lr = warmup_start_lr
+        self.gamma = gamma
+        self.cur_cycle_steps = first_cycle_steps
+        self.cycle = 0
+        self.step_in_cycle = 0
+        super().__init__(optimizer, last_epoch)
+    
+    def get_lr(self):
+        if self.last_epoch < self.warmup_steps:
+            # Linear warmup
+            lr_scale = (self.last_epoch + 1) / self.warmup_steps
+            return [self.warmup_start_lr + (self.max_lr - self.warmup_start_lr) * lr_scale 
+                    for _ in self.base_lrs]
+        else:
+            # Cosine annealing with restarts
+            # Calculate which cycle we're in
+            steps_since_warmup = self.last_epoch - self.warmup_steps
+            cycle_steps = 0
+            cycle = 0
+            while cycle_steps + int(self.first_cycle_steps * (self.cycle_mult ** cycle)) <= steps_since_warmup:
+                cycle_steps += int(self.first_cycle_steps * (self.cycle_mult ** cycle))
+                cycle += 1
+            
+            self.cycle = cycle
+            self.cur_cycle_steps = int(self.first_cycle_steps * (self.cycle_mult ** cycle))
+            self.step_in_cycle = steps_since_warmup - cycle_steps
+            
+            # Cosine annealing within current cycle
+            progress = self.step_in_cycle / self.cur_cycle_steps
+            cosine_decay = 0.5 * (1 + np.cos(np.pi * progress))
+            
+            # Apply gamma decay to max_lr for each cycle
+            cycle_max_lr = self.max_lr * (self.gamma ** cycle)
+            
+            return [self.min_lr + (cycle_max_lr - self.min_lr) * cosine_decay 
+                    for _ in self.base_lrs]
+
 class UNet(L.LightningModule):
-    def __init__(self, dropout_val, num_epochs, bs, lr):
+    def __init__(self, dropout_val, num_epochs, bs, lr, scheduler_type='cosine', 
+                 warmup_epochs=0, min_lr=0, first_cycle_steps=None, cycle_mult=1.0, 
+                 warmup_steps=0, gamma=1.0):
         super().__init__()
         
         # Encoder (Downsampling path)
@@ -273,11 +379,20 @@ class UNet(L.LightningModule):
         self.loss = MaskedPoissonLoss()
         self.pcc_metric = MaskedPearsonCorr()
         self.mse_metric = MaskedMSE()
-        # self.jsd_metric = MaskedJSDiv()
+        self.jsd_metric = MaskedJSDiv()
         
         self.lr = lr
         self.bs = bs
         self.num_epochs = num_epochs
+        
+        # Scheduler parameters
+        self.scheduler_type = scheduler_type  # 'cosine', 'cosine_warmup', 'warm_restarts'
+        self.warmup_epochs = warmup_epochs
+        self.min_lr = min_lr
+        self.first_cycle_steps = first_cycle_steps if first_cycle_steps is not None else num_epochs // 4
+        self.cycle_mult = cycle_mult
+        self.warmup_steps = warmup_steps
+        self.gamma = gamma
 
     def forward(self, x):
         # Encoder Path
@@ -319,44 +434,82 @@ class UNet(L.LightningModule):
         loss = self.loss(y_pred, y, mask)
         pcc_perf = self.pcc_metric(y_pred, y, mask)
         mse_metric = self.mse_metric(y_pred, y, mask)
-        # jsd_metric = self.jsd_metric(y_pred, y, mask)
+        jsd_metric = self.jsd_metric(y_pred, y, mask)
 
-        return loss, pcc_perf, mse_metric
+        return loss, pcc_perf, mse_metric, jsd_metric
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.num_epochs, eta_min=0)
-        return [optimizer], [scheduler]
+        
+        if self.scheduler_type == 'cosine':
+            # Standard cosine annealing
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=self.num_epochs, eta_min=self.min_lr
+            )
+        elif self.scheduler_type == 'cosine_warmup':
+            # Cosine annealing with warmup
+            scheduler = CosineWarmupScheduler(
+                optimizer, 
+                warmup_epochs=self.warmup_epochs,
+                max_epochs=self.num_epochs,
+                min_lr=self.min_lr,
+                warmup_start_lr=self.min_lr
+            )
+        elif self.scheduler_type == 'warm_restarts':
+            # Cosine annealing with warmup and warm restarts
+            scheduler = CosineAnnealingWarmRestartsScheduler(
+                optimizer,
+                first_cycle_steps=self.first_cycle_steps,
+                cycle_mult=self.cycle_mult,
+                max_lr=self.lr,
+                min_lr=self.min_lr,
+                warmup_steps=self.warmup_steps,
+                warmup_start_lr=self.min_lr,
+                gamma=self.gamma
+            )
+        else:
+            # Default: no scheduler (constant LR)
+            scheduler = None
+        
+        if scheduler is not None:
+            return [optimizer], [scheduler]
+        else:
+            return optimizer
     
     def training_step(self, batch):
 
-        loss, pcc_perf, mse_metric = self._get_loss(batch)
+        loss, pcc_perf, mse_metric, jsd_metric = self._get_loss(batch)
 
         self.log('train/loss', loss, batch_size=self.bs, sync_dist=True)
         self.log('train/pcc', pcc_perf, batch_size=self.bs, sync_dist=True)
         self.log('train/mse', mse_metric, batch_size=self.bs, sync_dist=True)
+        self.log('train/jsdiv', jsd_metric, batch_size=self.bs, sync_dist=True)
 
         return loss
     
     def validation_step(self, batch):
-        loss, pcc_perf, mse_metric = self._get_loss(batch)
+        loss, pcc_perf, mse_metric, jsd_metric = self._get_loss(batch)
 
         self.log('eval/loss', loss, on_epoch=True, sync_dist=True)
         self.log('eval/pcc', pcc_perf, on_epoch=True, sync_dist=True)
         self.log('eval/mse', mse_metric, on_epoch=True, sync_dist=True)
+        self.log('eval/jsdiv', jsd_metric, on_epoch=True, sync_dist=True)
 
         return loss
     
     def test_step(self, batch):
-        loss, pcc_perf, mse_metric = self._get_loss(batch)  
+        loss, pcc_perf, mse_metric, jsd_metric = self._get_loss(batch)  
 
         self.log('test/loss', loss, on_epoch=True, sync_dist=True)
         self.log('test/pcc_perf', pcc_perf, on_epoch=True, sync_dist=True)
         self.log('test/mse_metric', mse_metric, on_epoch=True, sync_dist=True)
+        self.log('test/jsdiv', jsd_metric, on_epoch=True, sync_dist=True)
 
         return loss
     
-def trainUNet(num_epochs, bs, lr, save_loc, train_loader, test_loader, val_loader, dropout_val, logger, num_gpus=1):
+def trainUNet(num_epochs, bs, lr, save_loc, train_loader, test_loader, val_loader, dropout_val, logger, num_gpus=1,
+              scheduler_type='cosine', warmup_epochs=0, min_lr=0, first_cycle_steps=None, 
+              cycle_mult=1.0, warmup_steps=0, gamma=1.0):
     # Create a PyTorch Lightning trainer with the generation callback
     trainer = L.Trainer(
         default_root_dir=save_loc,
@@ -378,7 +531,9 @@ def trainUNet(num_epochs, bs, lr, save_loc, train_loader, test_loader, val_loade
     trainer.logger._default_hp_metric = None  # Optional logging argument that we don't need
 
     # Check whether pretrained model exists. If yes, load it and skip training
-    model = UNet(dropout_val, num_epochs, bs, lr)
+    model = UNet(dropout_val, num_epochs, bs, lr, scheduler_type=scheduler_type,
+                 warmup_epochs=warmup_epochs, min_lr=min_lr, first_cycle_steps=first_cycle_steps,
+                 cycle_mult=cycle_mult, warmup_steps=warmup_steps, gamma=gamma)
     pytorch_total_params = sum(p.numel() for p in model.parameters())
     print("Total UNet parameters: ", pytorch_total_params)
 

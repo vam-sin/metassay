@@ -59,10 +59,6 @@ if __name__ == '__main__':
     val_ds = ChromDS(['_chr17_', '_chr18_', '_chr19_'], n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/all_npz/cache_dir')
     test_ds = ChromDS(['_chr20_', '_chr21_', '_chr22_'], n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/all_npz/cache_dir')
 
-    # train_ds = ChromDS(['_chr1_', '_chr2_', '_chr3_', '_chr4_', '_chr5_', '_chr6_', '_chr7_', '_chr8_', '_chr9_', '_chr10_', '_chr11_', '_chr12_', '_chr13_', '_chr14_', '_chr15_', '_chr16_'], n_jobs_load=args.n_jobs_load)
-    # val_ds = ChromDS(['_chr17_', '_chr18_', '_chr19_'], n_jobs_load=args.n_jobs_load)
-    # test_ds = ChromDS(['_chr20_', '_chr21_', '_chr22_'], n_jobs_load=args.n_jobs_load)
-
     print(f'Train: {len(train_ds)}, Test: {len(test_ds)}, Val: {len(val_ds)}')
 
     # Set multiprocessing start method to avoid conflicts
@@ -99,12 +95,17 @@ if __name__ == '__main__':
     # WandbLogger automatically handles DDP and only logs on rank 0
     # However, to prevent API initialization errors, we configure it with settings
     # that delay initialization until after Lightning sets up the distributed environment
+    # Create config dictionary with all hyperparameters for wandb web interface
+    config = {
+        'num_epochs': args.num_epochs,
+        'batch_size': args.bs,
+        'learning_rate': args.lr,
+        'dropout_val': args.dropout_val
+    }
     logger = L.pytorch.loggers.WandbLogger(
         project='metassay',
         log_model=False,  # Don't log model checkpoints to save space
-        # WandbLogger will automatically handle rank 0 only logging with DDP
-        # It checks the distributed environment during trainer.fit() and only
-        # initializes WandB on rank 0
+        config=config,  # Log hyperparameters to wandb web interface
     )
 
     save_loc = f'saved_models/UNet_{args.num_epochs}_{args.bs}_{args.lr}_{args.dropout_val}'

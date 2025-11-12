@@ -16,7 +16,7 @@ num_task = 198
 file_path = 'encode_dataset/dataset/'
 folder_list = os.listdir(file_path)
 # remove .chrom.sizes file
-folder_list = [f for f in folder_list if not f.endswith('.chrom.sizes') and not f.endswith('regions.bed')]
+folder_list = [f for f in folder_list if not f.endswith('.chrom.sizes') and not f.endswith('regions.bed') and not f.endswith('satellite_repeats.out')]
 # get all files in the folders
 file_list = []
 for folder in folder_list:
@@ -61,23 +61,13 @@ def process_file_values(key, chromosomes, chromosome_lengths):
 
         # get those in bin_regions for this chromosome
         chr_bins = [br for br in bin_regions if f'{ch}_' in br]
-        starts_old = [int(br.split('_')[1]) for br in chr_bins]
-        starts = []
-        ends = []
-        for st in starts_old:
-            new_st = st - 476 # push the start back equivalently
-            new_end = new_st + 3000
-            if new_st >= 0 and new_end < length: # check that the new start and stop fall within the legal bounds for the chromosome
-                starts.append(new_st)
-                ends.append(new_end)
-            else:
-                print(f'Illegal Bin: {ch} {st}') # to be plucked out from uniqueBins.npz
+        bin_starts = [int(br.split('_')[1]) for br in chr_bins]
 
-        for s, e in zip(starts, ends):
-            id_str = f"{ch}_{s}"
+        for bin_start in bin_starts:
+            id_str = f"{ch}_{bin_start}"
 
-            values = signal[s:e]
-            dna_seq = seqloader_instance.get_seq_start(ch, s, '+', ohe=False)  # one-hot encoded DNA sequence
+            values = signal[bin_start:bin_start + 3000]
+            dna_seq = seqloader_instance.get_seq_start(ch, bin_start, '+', ohe=False)  # one-hot encoded DNA sequence
 
             local_data[id_str] = {
                 task: values,
@@ -96,8 +86,3 @@ Parallel(n_jobs=n_jobs, backend="loky")(
     delayed(process_file_values)(key, chromosomes, chromosome_lengths)
     for key in tqdm(file_list)
 )
-
-'''
-input dna seq: 476, 2048, 476
-output values: 988, 1024, 988
-'''

@@ -12,7 +12,7 @@ chromosomes = ['chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr8', '
 with open('encode_dataset/final_3k/task_names.json', 'r') as f:
     task_names = json.load(f)
 
-bin_regions = np.load('encode_dataset/proc_3k/uniqueBins.npz', allow_pickle=True)['arr_0'].astype(str)
+bin_regions = np.load('encode_dataset/proc_3k/uniqueBins.npz', allow_pickle=True)['bins'].astype(str)
 bin_regions = sorted(bin_regions)
 bin_regions = [str(br) for br in bin_regions]
 
@@ -26,10 +26,7 @@ print(f'Number of Unique Bin Regions: {len(bin_regions)}')
 
 assert len(bin_regions) == sum([len(bin_regions_by_chr[chrom]) for chrom in chromosomes]), "Mismatch in bin region counts!"
 
-# sample output file
-proc_folder = 'encode_dataset/proc_3k/binTasks'
-
-output_folder = 'encode_dataset/final_3k/all'
+output_folder = 'encode_dataset/final_3k/all_npz'
 chunk_size = 1000
 
 def process_chrom(ch):
@@ -58,7 +55,7 @@ def process_chrom(ch):
 n_jobs = 2  # adjust to CPU count
 Parallel(n_jobs=n_jobs, backend="loky")(
     delayed(process_chrom)(ch)
-    for ch in tqdm(chromosomes)
+    for ch in tqdm(chromosomes[9:11])
 )
 
 print('Final data preparation complete.')

@@ -58,7 +58,7 @@ def process_file(file_path):
     return local_hist, local_count, local_sum, local_sum_sq, local_max, local_min
 
 # ---------------- MULTIPROCESS ----------------
-all_files = [os.path.join(folder, f) for f in os.listdir(folder)]
+all_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.npz')]
 
 num_workers = 16
 

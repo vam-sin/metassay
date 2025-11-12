@@ -56,7 +56,7 @@ def process_file(file_path):
 
     return local_hist, local_count, local_mean, local_M2, local_max, local_min
 
-all_files = [os.path.join(folder, f) for f in os.listdir(folder)]
+all_files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith('.npz')]
 
 num_workers = 16
 print(f"Processing {len(all_files)} files using {num_workers} cores...")

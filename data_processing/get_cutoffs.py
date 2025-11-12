@@ -5,6 +5,7 @@ script to analyse the csv files obtained from bin_stats.py to set cutoffs that w
 obtain a similar number of bins from all 3 output types. 
 downsampling is conducted so that no specific chromosome has a super high number of bins from that task. (done after setting the thresh for fc, and then pv/aln follow that)
 output: uniqueBins.npz (file that consists of all the bins that were chosen across all the 22 chromosomes)
+dont have to check blacklist regions here as we are only checking those bins that are not in the blacklist regions. (removed in the bin_stats.py script)
 '''
 import numpy as np
 import pandas as pd
@@ -23,7 +24,7 @@ chromosomes = ['chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr8', '
 file_path = 'encode_dataset/dataset/'
 folder_list = os.listdir(file_path)
 # remove .chrom.sizes file
-folder_list = [f for f in folder_list if not f.endswith('.chrom.sizes') and not f.endswith('regions.bed')]
+folder_list = [f for f in folder_list if not f.endswith('.chrom.sizes') and not f.endswith('regions.bed') and not f.endswith('satellite_repeats.out')]
 # get all files in the folders
 file_list = []
 for folder in folder_list:
@@ -43,10 +44,47 @@ print(f'Number of Tasks (ALN): {len(aln_tasks)}')  # should be 67
 
 assert len(fc_tasks) + len(pv_tasks) + len(aln_tasks) == len(tasks), "Task categorization error."
 
+# get mean and std of the mean of all the bins for each output type (fc, pc, aln)
+# fc_means_list = []
+# pv_means_list = []
+# aln_means_list = []
+# for task in tqdm(tasks):
+#     for ch in chromosomes:
+#         df_file = f'encode_dataset/proc_3k/bin_stats/{task}_{ch}.csv'
+#         df = pd.read_csv(df_file)
+#         means = df['mean'].tolist()
+#         if 'fc' in task:
+#             fc_means_list.extend(means)
+#         elif 'pv' in task:
+#             pv_means_list.extend(means)
+#         elif 'aln' in task:
+#             aln_means_list.extend(means)
+
+# fc_means = np.mean(fc_means_list)
+# pv_means = np.mean(pv_means_list)
+# aln_means = np.mean(aln_means_list)
+
+# fc_std = np.std(fc_means_list)
+# pv_std = np.std(pv_means_list)
+# aln_std = np.std(aln_means_list)
+
+# print(f'FC Means: {fc_means}')  
+# print(f'PV Means: {pv_means}')
+# print(f'ALN Means: {aln_means}')
+# print(f'FC Std: {fc_std}')
+# print(f'PV Std: {pv_std}')
+# print(f'ALN Std: {aln_std}')
+
+# cutoffs = {
+#     'fc': {'mean': fc_means, 'std': fc_std},
+#     'pv': {'mean': pv_means, 'std': pv_std},
+#     'aln': {'mean': aln_means, 'std': aln_std}
+# }
+
 cutoffs = {
-    'fc': {'mean': 0.6233088767015336, 'std': 1.1291127701216044},
-    'pv': {'mean': 0.7049074885691617, 'std': 10.938644432346093},
-    'aln': {'mean': 1.0188139424530114, 'std': 5.983112741975139}
+    'fc': {'mean': 0.6241491606827647, 'std': 0.9414642527728895},
+    'pv': {'mean': 0.7038336184982527, 'std': 7.333628925645824},
+    'aln': {'mean': 1.022139049185703, 'std': 6.443636625764475}
 }
 
 # check that each chromosome in each task has a reasonable number of bins above cutoff
@@ -54,21 +92,21 @@ def get_bins_above_cutoff(task):
     if 'fc' in task:
         cutoff = 2.0
     elif 'pv' in task:
-        cutoff = cutoffs['pv']['mean'] + 0.05 * cutoffs['pv']['std']
+        cutoff = cutoffs['pv']['mean'] + 0.00 * cutoffs['pv']['std']
     elif 'aln' in task:
-        cutoff = cutoffs['aln']['mean'] + 0.015 * cutoffs['aln']['std']
+        cutoff = cutoffs['aln']['mean'] + 0.00 * cutoffs['aln']['std']
     
     # print(f'--- Task: {task}, Cutoff: {cutoff} ---')
     total_bins_above_cutoff = 0
     chroms_start_bins = []
     for ch in chromosomes:
-        df_file = f'encode_dataset/proc/bin_stats/{task}_{ch}.csv'
+        df_file = f'encode_dataset/proc_3k/bin_stats/{task}_{ch}.csv'
         if os.path.exists(df_file):
             df_ch = pd.read_csv(df_file)
             bins_above_cutoff = np.sum(df_ch['mean'] > cutoff)
             total_bins_above_cutoff += bins_above_cutoff
             # merge chrom and in_start to get chrom_start
-            df_ch['chrom_start'] = df_ch['chrom'] + '_' + df_ch['in_start'].astype(str)
+            df_ch['chrom_start'] = df_ch['chrom'] + '_' + df_ch['bin_start'].astype(str)
             chroms_start_bins.extend(df_ch[df_ch['mean'] > cutoff]['chrom_start'].tolist())
     
     # print(f'Total Bins Above Cutoff for Task {task}: {total_bins_above_cutoff}')
@@ -142,5 +180,5 @@ print(f'Total Unique Chromosome Start Bins After Downsampling (FC): {len(set(dow
 print(f'Total Unique Chromosome Start Bins After Downsampling (PV): {len(set(downsamples_pv_chrom_start_bins))}')
 print(f'Total Unique Chromosome Start Bins After Downsampling (ALN): {len(set(downsamples_aln_chrom_start_bins))}')
 
-# save all downsampled chrom start bins to a file into npz
-np.savez_compressed('encode_dataset/proc/uniqueBins.npz', bins=list(set(downsampled_chrom_start_bins)))
+# save all downsampled chrom start bins to a file into npz (250,476 bins)
+np.savez_compressed('encode_dataset/proc_3k/uniqueBins.npz', bins=list(set(downsampled_chrom_start_bins)))
