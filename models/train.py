@@ -33,7 +33,7 @@ except (KeyError, OSError):
 os.environ['WANDB_SILENT'] = 'true'  # Reduce verbose output
 os.environ['WANDB_INIT_TIMEOUT'] = '60'  # Increase timeout for API calls
 
-from unet_utils import ChromDS, trainUNet 
+from utils import ChromDS, train_model 
 
 # %%
 if __name__ == '__main__':
@@ -42,22 +42,29 @@ if __name__ == '__main__':
     # It only logs on rank 0 by default when using DDP
     
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num_epochs', type=int, default=50)
+    parser.add_argument('--num_epochs', type=int, default=4)
     parser.add_argument('--bs', type=int, default=64)
     parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--n_jobs_load', type=int, default=32, help='Number of parallel jobs for loading and processing data')
     parser.add_argument('--dropout_val', type=float, default=0.1)
     parser.add_argument('--num_workers', type=int, default=0)
     parser.add_argument('--num_gpus', type=int, default=1, help='Number of GPUs to use (default: 1, use 2 for dual A100)')
+    parser.add_argument('--model_type', type=str, default='unet', choices=['unet', 'chrombpnet', 'resnet'], 
+                        help='Model type to use: unet, chrombpnet, or resnet')
+    parser.add_argument('--reverse_compl', action='store_true', help='Enable reverse complement augmentation')
     args = parser.parse_args()
 
     # reproducibility
     L.seed_everything(42)
 
     # load dataset
-    train_ds = ChromDS(['_chr1_', '_chr2_', '_chr3_', '_chr4_', '_chr5_', '_chr6_', '_chr7_', '_chr8_', '_chr9_', '_chr10_', '_chr11_', '_chr12_', '_chr13_', '_chr14_', '_chr15_', '_chr16_'], n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/all_npz/cache_dir')
-    val_ds = ChromDS(['_chr17_', '_chr18_', '_chr19_'], n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/all_npz/cache_dir')
-    test_ds = ChromDS(['_chr20_', '_chr21_', '_chr22_'], n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/all_npz/cache_dir')
+    train_ds = ChromDS(['_chr1_'], 
+                       n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/all_npz/cache_dir',
+                       reverse_compl=args.reverse_compl)
+    val_ds = ChromDS(['_chr17_'], n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/all_npz/cache_dir',
+                     reverse_compl=False)  # No augmentation for val/test
+    test_ds = ChromDS(['_chr20_'], n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/all_npz/cache_dir',
+                       reverse_compl=False)
 
     print(f'Train: {len(train_ds)}, Test: {len(test_ds)}, Val: {len(val_ds)}')
 
@@ -100,7 +107,9 @@ if __name__ == '__main__':
         'num_epochs': args.num_epochs,
         'batch_size': args.bs,
         'learning_rate': args.lr,
-        'dropout_val': args.dropout_val
+        'dropout_val': args.dropout_val,
+        'model_type': args.model_type,
+        'reverse_compl': args.reverse_compl
     }
     logger = L.pytorch.loggers.WandbLogger(
         project='metassay',
@@ -108,6 +117,22 @@ if __name__ == '__main__':
         config=config,  # Log hyperparameters to wandb web interface
     )
 
-    save_loc = f'saved_models/UNet_{args.num_epochs}_{args.bs}_{args.lr}_{args.dropout_val}'
+    model_name_map = {'unet': 'UNet', 'resnet': 'ResNet', 'chrombpnet': 'ChromBPNet'}
+    model_name = model_name_map.get(args.model_type, 'UNet')
+    save_loc = f'saved_models/{model_name}_{args.num_epochs}_{args.bs}_{args.lr}_{args.dropout_val}'
 
-    model, result = trainUNet(args.num_epochs, args.bs, args.lr, save_loc, train_dataloader, test_dataloader, val_dataloader, args.dropout_val, logger, args.num_gpus)
+    # Train the selected model using unified train_model function
+    print(f"Training {model_name}...")
+    model, result = train_model(
+        model_type=args.model_type,
+        num_epochs=args.num_epochs,
+        bs=args.bs,
+        lr=args.lr,
+        save_loc=save_loc,
+        train_loader=train_dataloader,
+        test_loader=test_dataloader,
+        val_loader=val_dataloader,
+        dropout_val=args.dropout_val,
+        logger=logger,
+        num_gpus=args.num_gpus
+    )
