@@ -27,7 +27,12 @@ for folder in folder_list:
     for f in files:
         file_list.append(os.path.join(file_path, folder, f))
 
-print(f'Number of Tasks: {len(file_list)}')  # should be 198
+redo_aln_files = ['aln_ENCSR000AMB.bw', 'aln_ENCSR000APV.bw', 'aln_ENCSR000EKQ.bw', 'aln_ENCSR278JQG.bw', 'aln_ENCSR337NWW.bw', 'aln_ENCSR441VHN.bw']
+
+# Filter file list to only process completed aln files and new pv/fc files
+file_list = [f for f in file_list if any(target in f for target in redo_aln_files)]
+
+print(f'Number of Tasks: {len(file_list)}')  # should be 67+8=75
 
 # Load blacklist once
 blr_df = pr.read_bed('encode_dataset/dataset/blacklist_regions.bed').df
@@ -129,7 +134,12 @@ def process_file(key, chromosomes, chromosome_lengths, bin_size):
     for ch in chromosomes:
         per_chrom_res = []
         length = chromosome_lengths[ch]
-        signal = load_signal_in_chunks(bw_file, ch, length)
+        try:
+            signal = load_signal_in_chunks(bw_file, ch, length)
+        except Exception as e:
+            print(f'Error loading signal for {os.path.basename(key)} {ch}: {e}')
+            continue
+
         if np.all(np.isnan(signal)):
             continue
 

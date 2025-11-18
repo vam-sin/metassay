@@ -12,12 +12,26 @@ import time
 import lightning as L
 from joblib import Parallel, delayed
 import hashlib
-import pickle
 from collections import defaultdict
+import random
+
+# Import architectures
+try:
+    from architectures import (
+        build_unet_architecture, build_chrombpnet_architecture, build_resnet_architecture,
+        forward_unet, forward_chrombpnet, forward_resnet
+    )
+except ImportError:
+    # If relative import fails, try absolute import from models package
+    from models.architectures import (
+        build_unet_architecture, build_chrombpnet_architecture, build_resnet_architecture,
+        forward_unet, forward_chrombpnet, forward_resnet
+    )
 
 # Load task groupings for task-wise metrics
 _task_groupings = None
 _task_names = None
+_excluded_aln_tasks = None
 
 def _load_task_groupings():
     """Load task groupings once and cache them."""
@@ -28,6 +42,27 @@ def _load_task_groupings():
         with open('../data_processing/encode_dataset/final_3k/task_names.json', 'r') as f:
             _task_names = json.load(f)
     return _task_groupings, _task_names
+
+def _get_excluded_aln_tasks():
+    """Get set of ALN tasks to exclude (Histone CHIP-Seq and PRO-cap ALN tasks)."""
+    global _excluded_aln_tasks
+    if _excluded_aln_tasks is None:
+        groupings, _ = _load_task_groupings()
+        excluded = set()
+        
+        # Get ALN tasks from Histone CHIP-Seq
+        if 'by_assay_type' in groupings and 'Histone CHIP-Seq' in groupings['by_assay_type']:
+            histone_tasks = groupings['by_assay_type']['Histone CHIP-Seq']['task_names']
+            excluded.update([t for t in histone_tasks if t.startswith('aln_')])
+        
+        # Get ALN tasks from PRO-cap
+        if 'by_assay_type' in groupings and 'PRO-cap' in groupings['by_assay_type']:
+            procap_tasks = groupings['by_assay_type']['PRO-cap']['task_names']
+            excluded.update([t for t in procap_tasks if t.startswith('aln_')])
+        
+        _excluded_aln_tasks = excluded
+    
+    return _excluded_aln_tasks
 
 def compute_task_wise_metrics(y_pred, y_true, mask, include_individual_tasks=True):
     """
@@ -138,7 +173,13 @@ def _process_sample(sample, task_names, i_s, o_s, tc, hc):
     """Helper function to process a single sample (for parallel processing)."""
     try:
         X = sample['dna_seq'].float()[:, i_s:-i_s]  # should already be ohe
-        y = torch.from_numpy(np.stack([sample[t] for t in task_names])).permute(1, 0)[o_s:-o_s, :]
+        
+        # Get excluded ALN tasks (Histone CHIP-Seq and PRO-cap)
+        excluded_tasks = _get_excluded_aln_tasks()
+        
+        # Filter out excluded tasks - only stack the tasks we want to predict
+        filtered_task_names = [t for t in task_names if t not in excluded_tasks]
+        y = torch.from_numpy(np.stack([sample[t] for t in filtered_task_names])).permute(1, 0)[o_s:-o_s, :]
 
         # hard-clipping the targets: f(x) = min(x, hc)
         y = torch.clamp(y, max=hc)
@@ -174,7 +215,7 @@ def _load_and_process_file(file_path, folder, task_names, i_s, o_s, tc, hc):
         return []
 
 class ChromDS(Dataset):
-    def __init__(self, chroms_list, input_size=2048, output_size=1024, reverse_compl=False, random_shift=False, n_jobs_load=16, data_cache_dir=None):
+    def __init__(self, chroms_list, input_size=2048, output_size=1024, reverse_compl=False, random_shift=False, n_jobs_load=16, data_cache_dir=None, dataset_downsampling=1.0):
         """
         In-memory dataset that loads and pre-processes all data during initialization.
         
@@ -186,6 +227,7 @@ class ChromDS(Dataset):
             random_shift: Whether to use random shifting (not implemented yet)
             n_jobs_load: Number of parallel jobs for loading and processing (default: 16)
             data_cache_dir: Directory to cache processed data (default: None, no caching)
+            dataset_downsampling: Fraction of dataset to use (default: 1.0, use 0.5 for half the dataset)
         """
         self.folder = '../data_processing/encode_dataset/final_3k/all_npz'
         
@@ -203,7 +245,15 @@ class ChromDS(Dataset):
         
         # load tasks json
         with open('../data_processing/encode_dataset/final_3k/task_names.json', 'r') as f:
-            self.task_names = json.load(f)
+            all_task_names = json.load(f)
+        
+        # Get excluded ALN tasks (Histone CHIP-Seq and PRO-cap)
+        excluded_tasks = _get_excluded_aln_tasks()
+        
+        # Filter out excluded tasks - dataset will only have 167 tasks
+        self.task_names = [t for t in all_task_names if t not in excluded_tasks]
+        print(f"Filtered out {len(excluded_tasks)} ALN tasks (Histone CHIP-Seq and PRO-cap)")
+        print(f"Using {len(self.task_names)} tasks (down from {len(all_task_names)})")
 
         self.i_s = int((3000-input_size)/2)
         self.o_s = int((3000-output_size)/2)
@@ -211,6 +261,7 @@ class ChromDS(Dataset):
         # transforms
         self.reverse_compl = reverse_compl
         self.random_shift = random_shift
+        self.dataset_downsampling = dataset_downsampling
 
         # soft-clip
         self.tc = 32.0
@@ -224,16 +275,22 @@ class ChromDS(Dataset):
             os.makedirs(data_cache_dir, exist_ok=True)
             cache_key = hashlib.md5(
                 (str(sorted(self.files_ds)) + str(input_size) + str(output_size) + 
-                 str(self.reverse_compl) + str(self.random_shift)).encode()
+                 str(self.reverse_compl) + str(self.random_shift) + str(dataset_downsampling)).encode()
             ).hexdigest()
-            cache_file = os.path.join(data_cache_dir, f'data_{cache_key}.pkl')
+            cache_file = os.path.join(data_cache_dir, f'data_{cache_key}.npz')
             
             if os.path.exists(cache_file):
                 print(f"Loading cached processed data from {cache_file}...")
                 try:
-                    with open(cache_file, 'rb') as f:
-                        self.data = pickle.load(f)
+                    cache_data = np.load(cache_file, allow_pickle=True)
+                    # Load X and y arrays
+                    X_list = cache_data['X_list']
+                    y_list = cache_data['y_list']
+                    # Convert back to list of tuples (X, y) as tensors
+                    self.data = [(torch.from_numpy(X), torch.from_numpy(y)) 
+                                for X, y in zip(X_list, y_list)]
                     print(f"Loaded {len(self.data)} pre-processed samples from cache")
+                    # Note: Cache already contains downsampled data if dataset_downsampling < 1.0 was used
                     return
                 except Exception as e:
                     print(f"Failed to load cache: {e}. Processing data...")
@@ -243,9 +300,13 @@ class ChromDS(Dataset):
         print("This may take several minutes. All data will be loaded into memory.")
         
         # Parallel loading and processing
+        # Need to pass all_task_names to _process_sample so it can filter correctly
+        with open('../data_processing/encode_dataset/final_3k/task_names.json', 'r') as f:
+            all_task_names = json.load(f)
+        
         processed_chunks = Parallel(n_jobs=n_jobs_load)(
             delayed(_load_and_process_file)(
-                file_path, self.folder, self.task_names, 
+                file_path, self.folder, all_task_names, 
                 self.i_s, self.o_s, self.tc, self.hc
             )
             for file_path in tqdm(self.files_ds, desc="Loading and processing files")
@@ -258,12 +319,25 @@ class ChromDS(Dataset):
         
         print(f"Loaded and processed {len(self.data)} samples into memory")
         
-        # Save processed data to cache if requested
+        # Apply dataset downsampling if requested (BEFORE saving to cache)
+        if dataset_downsampling < 1.0:
+            original_size = len(self.data)
+            target_size = int(len(self.data) * dataset_downsampling)
+            # Randomly sample without replacement
+            random.seed(42)  # For reproducibility
+            indices = random.sample(range(len(self.data)), target_size)
+            self.data = [self.data[i] for i in sorted(indices)]  # Sort to maintain some order
+            print(f"Downsampled dataset from {original_size} to {len(self.data)} samples ({dataset_downsampling*100:.1f}%)")
+        
+        # Save processed data to cache if requested (as npz) - cache already contains downsampled data
         if cache_file is not None:
             print(f"Saving processed data to cache: {cache_file}")
             try:
-                with open(cache_file, 'wb') as f:
-                    pickle.dump(self.data, f)
+                # Convert tensors to numpy arrays for saving
+                X_list = [X.numpy() for X, y in self.data]
+                y_list = [y.numpy() for X, y in self.data]
+                # Save as npz (already downsampled if requested)
+                np.savez(cache_file, X_list=X_list, y_list=y_list)
                 print("Processed data cached successfully!")
             except Exception as e:
                 print(f"Warning: Failed to cache processed data: {e}")
@@ -463,38 +537,6 @@ class CosineAnnealingWarmRestartsScheduler(torch.optim.lr_scheduler._LRScheduler
             return [self.min_lr + (cycle_max_lr - self.min_lr) * cosine_decay 
                     for _ in self.base_lrs]
 
-class ResNetBlock1D(nn.Module):
-    """Residual block for 1D convolutions."""
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, dropout=0.1):
-        super().__init__()
-        padding = kernel_size // 2
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, stride=stride, padding=padding)
-        self.bn1 = nn.BatchNorm1d(out_channels)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, padding=padding)
-        self.bn2 = nn.BatchNorm1d(out_channels)
-        
-        # Shortcut connection
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride),
-                nn.BatchNorm1d(out_channels)
-            )
-    
-    def forward(self, x):
-        residual = self.shortcut(x)
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.dropout(out)
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out += residual  # Residual connection
-        out = self.relu(out)
-        return out
-
 class Model(L.LightningModule):
     """
     Unified model class supporting multiple architectures:
@@ -509,10 +551,10 @@ class Model(L.LightningModule):
                  cycle_mult=1.0, warmup_steps=0, gamma=1.0, weight_decay=1e-4,
                  poisson_weight=0.7, mse_weight=0.3,
                  # UNet-specific args
+                 num_blocks=4, base_channels=64, conv_kernel_size=3, pool_kernel_size=2,
+                 input_conv_kernel_size=21, task_specific_conv_kernel_size=5,
                  # ChromBPNet-specific args
-                 filters=64, n_dil_layers=8, conv1_kernel_size=21, profile_kernel_size=75,
-                 # ResNet-specific args
-                 num_blocks=4, base_channels=64):
+                 filters=64, n_dil_layers=8, conv1_kernel_size=21, profile_kernel_size=75):
         super().__init__()
         
         self.model_type = model_type
@@ -537,299 +579,27 @@ class Model(L.LightningModule):
         
         # Build architecture based on model_type
         if model_type == 'unet':
-            self._build_unet(dropout_val)
+            build_unet_architecture(self, dropout_val, 
+                                   num_blocks=num_blocks,
+                                   base_channels=base_channels,
+                                   conv_kernel_size=conv_kernel_size,
+                                   pool_kernel_size=pool_kernel_size,
+                                   input_conv_kernel_size=input_conv_kernel_size,
+                                   task_specific_conv_kernel_size=task_specific_conv_kernel_size)
         elif model_type == 'chrombpnet':
-            self._build_chrombpnet(dropout_val, filters, n_dil_layers, conv1_kernel_size, profile_kernel_size)
+            build_chrombpnet_architecture(self, dropout_val, filters, n_dil_layers, conv1_kernel_size, profile_kernel_size)
         elif model_type == 'resnet':
-            self._build_resnet(dropout_val, num_blocks, base_channels)
+            build_resnet_architecture(self, dropout_val, num_blocks, base_channels)
         else:
             raise ValueError(f"Unknown model_type: {model_type}. Must be 'unet', 'chrombpnet', or 'resnet'")
-    
-    def _build_unet(self, dropout_val):
-        """Build UNet architecture."""
-        # Encoder (Downsampling path) - 4 blocks
-        self.enc1 = nn.Sequential(
-            nn.Conv1d(4, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.Dropout(dropout_val),
-            nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm1d(64),
-            nn.ReLU()
-        )
-        self.enc1_residual = nn.Conv1d(4, 64, kernel_size=1)  # Residual connection
-        self.pool1 = nn.MaxPool1d(kernel_size=2, stride=2)
-        
-        self.enc2 = nn.Sequential(
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Dropout(dropout_val),
-            nn.Conv1d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU()
-        )
-        self.enc2_residual = nn.Conv1d(64, 128, kernel_size=1)
-        self.pool2 = nn.MaxPool1d(kernel_size=2, stride=2)
-        
-        self.enc3 = nn.Sequential(
-            nn.Conv1d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(dropout_val),
-            nn.Conv1d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm1d(256),
-            nn.ReLU()
-        )
-        self.enc3_residual = nn.Conv1d(128, 256, kernel_size=1)
-        self.pool3 = nn.MaxPool1d(kernel_size=2, stride=2)
-        
-        # Additional encoder block
-        self.enc4 = nn.Sequential(
-            nn.Conv1d(256, 512, kernel_size=3, padding=1),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(dropout_val),
-            nn.Conv1d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm1d(512),
-            nn.ReLU()
-        )
-        self.enc4_residual = nn.Conv1d(256, 512, kernel_size=1)
-        self.pool4 = nn.MaxPool1d(kernel_size=2, stride=2)
-        
-        # Bottleneck
-        self.bottleneck = nn.Sequential(
-            nn.Conv1d(512, 1024, kernel_size=3, padding=1),
-            nn.BatchNorm1d(1024),
-            nn.ReLU(),
-            nn.Dropout(dropout_val),
-            nn.Conv1d(1024, 1024, kernel_size=3, padding=1),
-            nn.BatchNorm1d(1024),
-            nn.ReLU()
-        )
-        
-        # Decoder (Upsampling path) - 4 blocks
-        self.upconv4 = nn.ConvTranspose1d(1024, 512, kernel_size=2, stride=2)
-        self.dec4 = nn.Sequential(
-            nn.Conv1d(1024, 512, kernel_size=3, padding=1),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(dropout_val),
-            nn.Conv1d(512, 512, kernel_size=3, padding=1),
-            nn.BatchNorm1d(512),
-            nn.ReLU()
-        )
-        
-        self.upconv3 = nn.ConvTranspose1d(512, 256, kernel_size=2, stride=2)
-        self.dec3 = nn.Sequential(
-            nn.Conv1d(512, 256, kernel_size=3, padding=1),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(dropout_val),
-            nn.Conv1d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm1d(256),
-            nn.ReLU()
-        )
-        
-        self.upconv2 = nn.ConvTranspose1d(256, 128, kernel_size=2, stride=2)
-        self.dec2 = nn.Sequential(
-            nn.Conv1d(256, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Dropout(dropout_val),
-            nn.Conv1d(128, 128, kernel_size=3, padding=1),
-            nn.BatchNorm1d(128),
-            nn.ReLU()
-        )
-        
-        # Improved final output layer with intermediate layer
-        # Note: We skip the last upconv to maintain 1024 output size (4 pools, 3 upconvs)
-        self.final_conv = nn.Sequential(
-            nn.Conv1d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(dropout_val * 0.5),
-            nn.Conv1d(256, 198, kernel_size=1)  # 198 output tracks
-        )
-    
-    def _build_chrombpnet(self, dropout_val, filters, n_dil_layers, conv1_kernel_size, profile_kernel_size):
-        """Build ChromBPNet architecture."""
-        self.filters = filters
-        self.n_dil_layers = n_dil_layers
-        self.conv1_kernel_size = conv1_kernel_size
-        self.profile_kernel_size = profile_kernel_size
-        
-        # First convolution without dilation
-        self.conv1 = nn.Sequential(
-            nn.Conv1d(4, filters, kernel_size=conv1_kernel_size, padding='valid'),
-            nn.BatchNorm1d(filters),
-            nn.ReLU(),
-            nn.Dropout(dropout_val)
-        )
-        
-        # Dilated convolutions with residual connections
-        self.dilated_convs = nn.ModuleList()
-        for i in range(1, n_dil_layers + 1):
-            dilation = 2 ** i
-            conv = nn.Sequential(
-                nn.Conv1d(filters, filters, kernel_size=3, padding='valid', dilation=dilation),
-                nn.BatchNorm1d(filters),
-                nn.ReLU(),
-                nn.Dropout(dropout_val)
-            )
-            self.dilated_convs.append(conv)
-        
-        # Profile prediction branch
-        self.prof_conv = nn.Conv1d(filters, 198, kernel_size=profile_kernel_size, padding='valid')
-    
-    def _build_resnet(self, dropout_val, num_blocks, base_channels):
-        """Build ResNet architecture."""
-        # Initial convolution
-        self.initial_conv = nn.Sequential(
-            nn.Conv1d(4, base_channels, kernel_size=7, padding=3),
-            nn.BatchNorm1d(base_channels),
-            nn.ReLU(),
-            nn.Dropout(dropout_val)
-        )
-        
-        # Residual blocks with increasing channels
-        self.blocks = nn.ModuleList()
-        channels = base_channels
-        for i in range(num_blocks):
-            next_channels = channels * 2 if i < num_blocks - 1 else channels
-            stride = 2 if i < num_blocks - 1 else 1
-            self.blocks.append(ResNetBlock1D(channels, next_channels, kernel_size=3, 
-                                            stride=stride, dropout=dropout_val))
-            channels = next_channels
-        
-        # Global average pooling
-        self.global_pool = nn.AdaptiveAvgPool1d(1)
-        
-        # Final output layers
-        self.final_layers = nn.Sequential(
-            nn.Linear(channels, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(dropout_val),
-            nn.Linear(512, 256),
-            nn.BatchNorm1d(256),
-            nn.ReLU(),
-            nn.Dropout(dropout_val * 0.5),
-            nn.Linear(256, 198)  # 198 output tracks
-        )
-    
-    def _crop_center(self, x, target_length):
-        """Crop or interpolate tensor to target length from center (for ChromBPNet)."""
-        current_length = x.shape[-1]
-        if current_length == target_length:
-            return x
-        elif current_length > target_length:
-            crop_size = (current_length - target_length) // 2
-            return x[:, :, crop_size:current_length - crop_size]
-        else:
-            x_interp = torch.nn.functional.interpolate(
-                x, size=target_length, mode='linear', align_corners=False
-            )
-            return x_interp
 
     def forward(self, x):
         if self.model_type == 'unet':
-            return self._forward_unet(x)
+            return forward_unet(self, x)
         elif self.model_type == 'chrombpnet':
-            return self._forward_chrombpnet(x)
+            return forward_chrombpnet(self, x)
         elif self.model_type == 'resnet':
-            return self._forward_resnet(x)
-    
-    def _forward_unet(self, x):
-        """Forward pass for UNet."""
-        # Encoder Path with residual connections
-        enc1_out = self.enc1(x)
-        enc1_res = self.enc1_residual(x)
-        enc1 = enc1_out + enc1_res  # Residual connection
-        p1 = self.pool1(enc1)
-        
-        enc2_out = self.enc2(p1)
-        enc2_res = self.enc2_residual(p1)
-        enc2 = enc2_out + enc2_res
-        p2 = self.pool2(enc2)
-        
-        enc3_out = self.enc3(p2)
-        enc3_res = self.enc3_residual(p2)
-        enc3 = enc3_out + enc3_res
-        p3 = self.pool3(enc3)
-        
-        enc4_out = self.enc4(p3)
-        enc4_res = self.enc4_residual(p3)
-        enc4 = enc4_out + enc4_res
-        p4 = self.pool4(enc4)
-        
-        # Bottleneck
-        bottleneck = self.bottleneck(p4)
-        
-        # Decoder Path with Skip Connections
-        up4 = self.upconv4(bottleneck)
-        concat4 = torch.cat([up4, enc4], dim=1)  # Skip connection
-        dec4 = self.dec4(concat4)
-        
-        up3 = self.upconv3(dec4)
-        concat3 = torch.cat([up3, enc3], dim=1)  # Skip connection
-        dec3 = self.dec3(concat3)
-        
-        up2 = self.upconv2(dec3)
-        concat2 = torch.cat([up2, enc2], dim=1)  # Skip connection
-        dec2 = self.dec2(concat2)
-        
-        # Final convolution (skip last upconv to maintain 1024 output size)
-        out = self.final_conv(dec2).permute(0, 2, 1)
-        return out
-    
-    def _forward_chrombpnet(self, x):
-        """Forward pass for ChromBPNet."""
-        # First convolution
-        x = self.conv1(x)  # [B, filters, seq_len']
-        
-        # Dilated convolutions with residual connections
-        for i, dilated_conv in enumerate(self.dilated_convs):
-            conv_x = dilated_conv(x)
-            # Crop x to match conv_x size (symmetric cropping)
-            x_len = x.shape[-1]
-            conv_x_len = conv_x.shape[-1]
-            crop_size = (x_len - conv_x_len) // 2
-            x_cropped = x[:, :, crop_size:x_len - crop_size]
-            # Residual connection
-            x = conv_x + x_cropped
-        
-        # Profile prediction branch
-        prof_out = self.prof_conv(x)  # [B, 198, seq_len'']
-        
-        # Crop to match output size (1024)
-        target_length = 1024
-        prof_out = self._crop_center(prof_out, target_length)
-        
-        # Permute to [B, seq_len, 198]
-        out = prof_out.permute(0, 2, 1)
-        return out
-    
-    def _forward_resnet(self, x):
-        """Forward pass for ResNet."""
-        # Initial convolution
-        x = self.initial_conv(x)
-        
-        # Residual blocks
-        for block in self.blocks:
-            x = block(x)
-        
-        # Global average pooling
-        x = self.global_pool(x)  # [B, C, 1]
-        x = x.squeeze(-1)  # [B, C]
-        
-        # Final layers
-        x = self.final_layers(x)  # [B, 198]
-        
-        # Expand to [B, seq_len, 198] by repeating across sequence dimension
-        seq_len = 1024
-        x = x.unsqueeze(1).repeat(1, seq_len, 1)  # [B, 1024, 198]
-        return x
+            return forward_resnet(self, x)
     
     def _get_loss(self, batch):
         # get features and labels
@@ -884,43 +654,42 @@ class Model(L.LightningModule):
     def training_step(self, batch):
         loss, pcc_perf, mse_metric, jsd_metric = self._get_loss(batch)
 
-        self.log('train/loss', loss, batch_size=self.bs, sync_dist=True)
-        self.log('train/pcc', pcc_perf, batch_size=self.bs, sync_dist=True)
-        self.log('train/mse', mse_metric, batch_size=self.bs, sync_dist=True)
-        self.log('train/jsdiv', jsd_metric, batch_size=self.bs, sync_dist=True)
+        self.log('train/loss', loss, batch_size=self.bs)
+        self.log('train/pcc', pcc_perf, batch_size=self.bs)
+        self.log('train/mse', mse_metric, batch_size=self.bs)
+        self.log('train/jsdiv', jsd_metric, batch_size=self.bs)
 
         return loss
     
     def validation_step(self, batch):
         loss, pcc_perf, mse_metric, jsd_metric = self._get_loss(batch)
 
-        self.log('eval/loss', loss, on_epoch=True, sync_dist=True)
-        self.log('eval/pcc', pcc_perf, on_epoch=True, sync_dist=True)
-        self.log('eval/mse', mse_metric, on_epoch=True, sync_dist=True)
-        self.log('eval/jsdiv', jsd_metric, on_epoch=True, sync_dist=True)
+        self.log('eval/loss', loss, on_epoch=True)
+        self.log('eval/pcc', pcc_perf, on_epoch=True)
+        self.log('eval/mse', mse_metric, on_epoch=True)
+        self.log('eval/jsdiv', jsd_metric, on_epoch=True)
 
-        # Store predictions and targets for task-wise metrics (only on rank 0 to avoid duplicates)
-        if self.trainer.global_rank == 0:
-            x, y = batch
-            y_pred = self.forward(x)
-            mask = ~torch.isnan(y)
-            
-            # Store in a list that accumulates across batches
-            if not hasattr(self, '_val_preds'):
-                self._val_preds = []
-                self._val_targets = []
-                self._val_masks = []
-            
-            # Move to CPU immediately to save GPU memory
-            self._val_preds.append(y_pred.detach().cpu())
-            self._val_targets.append(y.detach().cpu())
-            self._val_masks.append(mask.detach().cpu())
+        # Store predictions and targets for task-wise metrics
+        x, y = batch
+        y_pred = self.forward(x)
+        mask = ~torch.isnan(y)
+        
+        # Store in a list that accumulates across batches
+        if not hasattr(self, '_val_preds'):
+            self._val_preds = []
+            self._val_targets = []
+            self._val_masks = []
+        
+        # Move to CPU immediately to save GPU memory
+        self._val_preds.append(y_pred.detach().cpu())
+        self._val_targets.append(y.detach().cpu())
+        self._val_masks.append(mask.detach().cpu())
 
         return loss
     
     def on_validation_epoch_end(self):
         """Compute and log task-wise metrics at the end of validation epoch (cell types and output types only)."""
-        if self.trainer.global_rank == 0 and hasattr(self, '_val_preds'):
+        if hasattr(self, '_val_preds'):
             # Concatenate all batches
             y_pred_all = torch.cat(self._val_preds, dim=0)
             y_true_all = torch.cat(self._val_targets, dim=0)
@@ -932,7 +701,7 @@ class Model(L.LightningModule):
             # Log metrics for each grouping
             for group_name, group_metrics in task_metrics.items():
                 for metric_name, metric_value in group_metrics.items():
-                    self.log(f'eval/{group_name}/{metric_name}', metric_value, on_epoch=True, sync_dist=False)
+                    self.log(f'eval/{group_name}/{metric_name}', metric_value, on_epoch=True)
             
             # Clear stored predictions and free GPU memory
             del self._val_preds
@@ -943,33 +712,32 @@ class Model(L.LightningModule):
     def test_step(self, batch):
         loss, pcc_perf, mse_metric, jsd_metric = self._get_loss(batch)  
 
-        self.log('test/loss', loss, on_epoch=True, sync_dist=True)
-        self.log('test/pcc_perf', pcc_perf, on_epoch=True, sync_dist=True)
-        self.log('test/mse_metric', mse_metric, on_epoch=True, sync_dist=True)
-        self.log('test/jsdiv', jsd_metric, on_epoch=True, sync_dist=True)
+        self.log('test/loss', loss, on_epoch=True)
+        self.log('test/pcc_perf', pcc_perf, on_epoch=True)
+        self.log('test/mse_metric', mse_metric, on_epoch=True)
+        self.log('test/jsdiv', jsd_metric, on_epoch=True)
 
-        # Store predictions and targets for task-wise metrics (only on rank 0 to avoid duplicates)
-        if self.trainer.global_rank == 0:
-            x, y = batch
-            y_pred = self.forward(x)
-            mask = ~torch.isnan(y)
-            
-            # Store in a list that accumulates across batches
-            if not hasattr(self, '_test_preds'):
-                self._test_preds = []
-                self._test_targets = []
-                self._test_masks = []
-            
-            # Move to CPU immediately to save GPU memory
-            self._test_preds.append(y_pred.detach().cpu())
-            self._test_targets.append(y.detach().cpu())
-            self._test_masks.append(mask.detach().cpu())
+        # Store predictions and targets for task-wise metrics
+        x, y = batch
+        y_pred = self.forward(x)
+        mask = ~torch.isnan(y)
+        
+        # Store in a list that accumulates across batches
+        if not hasattr(self, '_test_preds'):
+            self._test_preds = []
+            self._test_targets = []
+            self._test_masks = []
+        
+        # Move to CPU immediately to save GPU memory
+        self._test_preds.append(y_pred.detach().cpu())
+        self._test_targets.append(y.detach().cpu())
+        self._test_masks.append(mask.detach().cpu())
 
         return loss
     
     def on_test_epoch_end(self):
         """Compute and log task-wise metrics at the end of test epoch."""
-        if self.trainer.global_rank == 0 and hasattr(self, '_test_preds'):
+        if hasattr(self, '_test_preds'):
             # Concatenate all batches
             y_pred_all = torch.cat(self._test_preds, dim=0)
             y_true_all = torch.cat(self._test_targets, dim=0)
@@ -981,7 +749,7 @@ class Model(L.LightningModule):
             # Log metrics for each grouping
             for group_name, group_metrics in task_metrics.items():
                 for metric_name, metric_value in group_metrics.items():
-                    self.log(f'test/{group_name}/{metric_name}', metric_value, on_epoch=True, sync_dist=False)
+                    self.log(f'test/{group_name}/{metric_name}', metric_value, on_epoch=True)
             
             # Clear stored predictions and free GPU memory
             del self._test_preds
@@ -991,12 +759,15 @@ class Model(L.LightningModule):
     
 def train_model(model_type='unet', num_epochs=50, bs=64, lr=5e-4, save_loc=None, 
                 train_loader=None, test_loader=None, val_loader=None, dropout_val=0.1, 
-                logger=None, num_gpus=1, scheduler_type='cosine_warmup', warmup_epochs=3, 
+                logger=None, scheduler_type='cosine_warmup', warmup_epochs=3, 
                 min_lr=1e-6, first_cycle_steps=None, cycle_mult=1.0, warmup_steps=0, gamma=1.0, 
                 weight_decay=1e-4, poisson_weight=0.7, mse_weight=0.3, gradient_clip_val=1.0,
                 # Architecture-specific parameters
-                filters=64, n_dil_layers=8, conv1_kernel_size=21, profile_kernel_size=75,
-                num_blocks=4, base_channels=64):
+                # UNet-specific
+                num_blocks=4, base_channels=64, conv_kernel_size=3, pool_kernel_size=2,
+                input_conv_kernel_size=21, task_specific_conv_kernel_size=5,
+                # ChromBPNet-specific
+                filters=64, n_dil_layers=8, conv1_kernel_size=21, profile_kernel_size=75):
     """
     Unified training function for all model architectures.
     
@@ -1008,8 +779,7 @@ def train_model(model_type='unet', num_epochs=50, bs=64, lr=5e-4, save_loc=None,
     trainer = L.Trainer(
         default_root_dir=save_loc,
         accelerator="auto",
-        devices=num_gpus,
-        strategy="ddp" if num_gpus > 1 else "auto",
+        devices=1,
         accumulate_grad_batches=1,
         logger=logger,
         max_epochs=num_epochs,
@@ -1046,7 +816,11 @@ def train_model(model_type='unet', num_epochs=50, bs=64, lr=5e-4, save_loc=None,
         conv1_kernel_size=conv1_kernel_size,
         profile_kernel_size=profile_kernel_size,
         num_blocks=num_blocks,
-        base_channels=base_channels
+        base_channels=base_channels,
+        conv_kernel_size=conv_kernel_size,
+        pool_kernel_size=pool_kernel_size,
+        input_conv_kernel_size=input_conv_kernel_size,
+        task_specific_conv_kernel_size=task_specific_conv_kernel_size
     )
     pytorch_total_params = sum(p.numel() for p in model.parameters())
     print(f"Total {model_type.upper()} parameters: {pytorch_total_params:,}")

@@ -13,7 +13,8 @@ from tqdm import tqdm
 import os
 from joblib import Parallel, delayed
 import random 
-
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 # set random seed for reproducibility
 random.seed(42)
 np.random.seed(42)
@@ -44,21 +45,22 @@ print(f'Number of Tasks (ALN): {len(aln_tasks)}')  # should be 67
 
 assert len(fc_tasks) + len(pv_tasks) + len(aln_tasks) == len(tasks), "Task categorization error."
 
-# get mean and std of the mean of all the bins for each output type (fc, pc, aln)
+# # get mean and std of the mean of all the bins for each output type (fc, pc, aln)
 # fc_means_list = []
 # pv_means_list = []
 # aln_means_list = []
 # for task in tqdm(tasks):
 #     for ch in chromosomes:
-#         df_file = f'encode_dataset/proc_3k/bin_stats/{task}_{ch}.csv'
-#         df = pd.read_csv(df_file)
-#         means = df['mean'].tolist()
-#         if 'fc' in task:
-#             fc_means_list.extend(means)
-#         elif 'pv' in task:
-#             pv_means_list.extend(means)
-#         elif 'aln' in task:
-#             aln_means_list.extend(means)
+#         if 'aln' in task:
+#             df_file = f'encode_dataset/proc_3k/bin_stats/{task}_{ch}.csv'
+#             df = pd.read_csv(df_file)
+#             means = df['mean'].tolist()
+#             if 'fc' in task:
+#                 fc_means_list.extend(means)
+#             elif 'pv' in task:
+#                 pv_means_list.extend(means)
+#             elif 'aln' in task:
+#                 aln_means_list.extend(means)
 
 # fc_means = np.mean(fc_means_list)
 # pv_means = np.mean(pv_means_list)
@@ -76,25 +78,27 @@ assert len(fc_tasks) + len(pv_tasks) + len(aln_tasks) == len(tasks), "Task categ
 # print(f'ALN Std: {aln_std}')
 
 # cutoffs = {
-#     'fc': {'mean': fc_means, 'std': fc_std},
-#     'pv': {'mean': pv_means, 'std': pv_std},
-#     'aln': {'mean': aln_means, 'std': aln_std}
+#     'fc': {'mean': 0.623366859516083, 'std': 0.9404246963283813},
+#     'pv': {'mean': 0.7048715054568124, 'std': 7.292673462668909},
+#     'aln': {'mean': 1.0364701598686537, 'std': 2.3632760703633244}
 # }
 
-cutoffs = {
-    'fc': {'mean': 0.6241491606827647, 'std': 0.9414642527728895},
-    'pv': {'mean': 0.7038336184982527, 'std': 7.333628925645824},
-    'aln': {'mean': 1.022139049185703, 'std': 6.443636625764475}
-}
+# get task wise means
+task_wise_means = {}
+for task in tqdm(tasks):
+    task_wise_means[task] = {}
+    task_list = []
+    for ch in chromosomes:
+        df_file = f'encode_dataset/proc_3k/bin_stats/{task}_{ch}.csv'
+        if os.path.exists(df_file):
+            df_ch = pd.read_csv(df_file)
+            means = df_ch['mean'].tolist()
+            task_list.extend(means)
+    task_wise_means[task] = np.mean(task_list)
 
 # check that each chromosome in each task has a reasonable number of bins above cutoff
 def get_bins_above_cutoff(task):
-    if 'fc' in task:
-        cutoff = 2.0
-    elif 'pv' in task:
-        cutoff = cutoffs['pv']['mean'] + 0.00 * cutoffs['pv']['std']
-    elif 'aln' in task:
-        cutoff = cutoffs['aln']['mean'] + 0.00 * cutoffs['aln']['std']
+    cutoff = task_wise_means[task]
     
     # print(f'--- Task: {task}, Cutoff: {cutoff} ---')
     total_bins_above_cutoff = 0
@@ -115,70 +119,109 @@ def get_bins_above_cutoff(task):
 
 chrom_start_bins_lists = Parallel(n_jobs=128)(delayed(get_bins_above_cutoff)(task) for task in tqdm(tasks))
 
+print(len(chrom_start_bins_lists))
+
 print('--- Summary of Chromosome Start Bins Across All Tasks ---')
 
 chrom_start_bins = []
 fc_chrom_start_bins = []
 pv_chrom_start_bins = []
 aln_chrom_start_bins = []
+fc_lists_size = []
+pv_lists_size = []
+aln_lists_size = []
 # merge all lists
 for task_dict in chrom_start_bins_lists:
     for task, bins in task_dict.items():
         if 'fc' in task:
             fc_chrom_start_bins.extend(bins)
+            fc_lists_size.append(len(bins))
         elif 'pv' in task:
             pv_chrom_start_bins.extend(bins)
+            pv_lists_size.append(len(bins))
         elif 'aln' in task:
             aln_chrom_start_bins.extend(bins)
-
+            aln_lists_size.append(len(bins))
         chrom_start_bins.extend(bins)
+
+# combine all lists with their types, then sort together
+all_sizes = []
+all_types = []
+for size in fc_lists_size:
+    all_sizes.append(size)
+    all_types.append('FC')
+for size in pv_lists_size:
+    all_sizes.append(size)
+    all_types.append('PV')
+for size in aln_lists_size:
+    all_sizes.append(size)
+    all_types.append('ALN')
+
+# sort together by size
+sorted_indices = np.argsort(all_sizes)
+sorted_sizes = [all_sizes[i] for i in sorted_indices]
+sorted_types = [all_types[i] for i in sorted_indices]
+
+# create color map
+colors = {'FC': 'red', 'PV': 'blue', 'ALN': 'green'}
+bar_colors = [colors[t] for t in sorted_types]
+
+# calculate total bins
+total_bins = sum(sorted_sizes)
+
+max_bins_per_task = 2500
+
+# plot the value of each of values in lists_sizes, and color by the output type, sort it, all together so the x axis range is 198, and make it a bar plot
+plt.figure()
+plt.bar(range(len(sorted_sizes)), sorted_sizes, color=bar_colors)
+# create custom legend
+legend_elements = [Patch(facecolor='red', label='FC'),
+                   Patch(facecolor='blue', label='PV'),
+                   Patch(facecolor='green', label='ALN')]
+plt.legend(handles=legend_elements)
+plt.xlabel('Task Index (sorted by size)')
+plt.ylabel('Number of Bins')
+# plt.ylim(0, max_bins_per_task)
+plt.savefig('encode_dataset/proc_3k/lists_size_distribution.png', dpi=300, bbox_inches='tight')
 
 print(f'Total Unique Chromosome Start Bins Across All Tasks: {len(set(chrom_start_bins))}')
 print(f'Total Unique Chromosome Start Bins Across All FC Tasks: {len(set(fc_chrom_start_bins))}')
 print(f'Total Unique Chromosome Start Bins Across All PV Tasks: {len(set(pv_chrom_start_bins))}')
 print(f'Total Unique Chromosome Start Bins Across All ALN Tasks: {len(set(aln_chrom_start_bins))}')
 
-# get min for fc, pv, and aln tasks
-min_fc = float('inf')
-min_pv = float('inf')
-min_aln = float('inf')
-for task_dict in chrom_start_bins_lists:
-    for task, bins in task_dict.items():
-        if 'fc' in task:
-            min_fc = min(min_fc, len(bins))
-        elif 'pv' in task:
-            min_pv = min(min_pv, len(bins))
-        elif 'aln' in task:
-            min_aln = min(min_aln, len(bins))
+# print the min number per output type
+print('Min bins per task (global): ', min(sorted_sizes))
 
-# # downsample each of the tasks to their respective mins
+# downsample each task to max 100k bins
 downsampled_chrom_start_bins = []
-downsamples_fc_chrom_start_bins = []
-downsamples_pv_chrom_start_bins = []
-downsamples_aln_chrom_start_bins = []
+downsampled_fc_chrom_start_bins = []
+downsampled_pv_chrom_start_bins = []
+downsampled_aln_chrom_start_bins = []
 
-for task_dict in chrom_start_bins_lists:
+print(f'\n--- Downsampling each task to max {max_bins_per_task:,} bins ---')
+for task_dict in tqdm(chrom_start_bins_lists):
     for task, bins in task_dict.items():
-        if 'fc' in task:
-            downsampled_bins = np.random.choice(bins, min_fc, replace=False).tolist()
-        elif 'pv' in task:
-            downsampled_bins = np.random.choice(bins, min_pv, replace=False).tolist()
-        elif 'aln' in task:
-            downsampled_bins = np.random.choice(bins, min_aln, replace=False).tolist()
+        if len(bins) > max_bins_per_task:
+            # randomly downsample to max_bins_per_task
+            downsampled_bins = np.random.choice(bins, max_bins_per_task, replace=False).tolist()
+        else:
+            # keep all bins if under the limit
+            downsampled_bins = bins
+        
         downsampled_chrom_start_bins.extend(downsampled_bins)
-
+        
         if 'fc' in task:
-            downsamples_fc_chrom_start_bins.extend(downsampled_bins)
+            downsampled_fc_chrom_start_bins.extend(downsampled_bins)
         elif 'pv' in task:
-            downsamples_pv_chrom_start_bins.extend(downsampled_bins)
+            downsampled_pv_chrom_start_bins.extend(downsampled_bins)
         elif 'aln' in task:
-            downsamples_aln_chrom_start_bins.extend(downsampled_bins)
+            downsampled_aln_chrom_start_bins.extend(downsampled_bins)
 
-print('--- Summary of Downsampled Chromosome Start Bins Across All Tasks ---')
-print(f'Total Unique Chromosome Start Bins After Downsampling: {len(set(downsampled_chrom_start_bins))}')
-print(f'Total Unique Chromosome Start Bins After Downsampling (FC): {len(set(downsamples_fc_chrom_start_bins))}')
-print(f'Total Unique Chromosome Start Bins After Downsampling (PV): {len(set(downsamples_pv_chrom_start_bins))}')
-print(f'Total Unique Chromosome Start Bins After Downsampling (ALN): {len(set(downsamples_aln_chrom_start_bins))}')
+print(f'\n--- Summary After Downsampling Each Task to Max {max_bins_per_task:,} Bins ---')
+print(f'Total Unique Chromosome Start Bins: {len(set(downsampled_chrom_start_bins)):,}')
+print(f'Total Unique Chromosome Start Bins (FC): {len(set(downsampled_fc_chrom_start_bins)):,}')
+print(f'Total Unique Chromosome Start Bins (PV): {len(set(downsampled_pv_chrom_start_bins)):,}')
+print(f'Total Unique Chromosome Start Bins (ALN): {len(set(downsampled_aln_chrom_start_bins)):,}')
 
-# save all downsampled chrom start bins to a file into npz (250,476 bins)
+# # save all downsampled chrom start bins to a file into npz (250,476 bins)
 np.savez_compressed('encode_dataset/proc_3k/uniqueBins.npz', bins=list(set(downsampled_chrom_start_bins)))

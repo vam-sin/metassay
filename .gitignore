@@ -4,6 +4,6 @@ encode_embeds/outputs
 models/saved_models
 models/wandb
 models/api_keys.json
-models/unet_runs
+models/runs
 __pycache__
 .cache

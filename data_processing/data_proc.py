@@ -6,6 +6,12 @@ import os
 from joblib import Parallel, delayed
 import time
 from utils import seq_loader
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--n_jobs', type=int, default=8)
+parser.add_argument('--section', type=int, default=0)
+args = parser.parse_args()
 
 chromosomes = ['chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr8', 'chr9', 'chr10', 'chr11', 'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 'chr20', 'chr21', 'chr22']
 # in_size = 2048
@@ -26,6 +32,17 @@ for folder in folder_list:
 
 print(f'Number of Tasks: {len(file_list)}')  # should be 198
 file_list = sorted(file_list)
+
+if args.section == 0:
+    file_list = file_list[:50]
+elif args.section == 1:
+    file_list = file_list[50:100]
+elif args.section == 2:
+    file_list = file_list[100:150]
+elif args.section == 3:
+    file_list = file_list[150:200]
+else:
+    raise ValueError(f'Invalid section: {args.section}')
 
 # get all chromosome lengths and make the chromosome length dict
 bw_file = pyBigWig.open(file_list[0])
@@ -81,7 +98,7 @@ def process_file_values(key, chromosomes, chromosome_lengths):
     np.savez(f'encode_dataset/proc_3k/binTasks/{os.path.basename(task)}.npz', local_data)
 
 # Parallelize across files
-n_jobs = 16  # adjust to CPU count
+n_jobs = 8  # adjust to CPU count
 Parallel(n_jobs=n_jobs, backend="loky")(
     delayed(process_file_values)(key, chromosomes, chromosome_lengths)
     for key in tqdm(file_list)

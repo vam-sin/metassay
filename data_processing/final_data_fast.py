@@ -5,6 +5,12 @@ import os
 from tangermeme.utils import one_hot_encode
 import json
 from joblib import Parallel, delayed
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--n_jobs', type=int, default=8)
+parser.add_argument('--section', type=int, default=0)
+args = parser.parse_args()
 
 chromosomes = ['chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr8', 'chr9', 'chr10', 'chr11', 'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 'chr20', 'chr21', 'chr22']
 
@@ -53,9 +59,20 @@ def process_chrom(ch):
         np.savez_compressed(chunk_out_file, chunk_data)
 
 n_jobs = 2  # adjust to CPU count
+if args.section == 0:
+    chromosomes = chromosomes[:5]
+elif args.section == 1:
+    chromosomes = chromosomes[5:10]
+elif args.section == 2:
+    chromosomes = chromosomes[10:15]
+elif args.section == 3:
+    chromosomes = chromosomes[15:]
+else:
+    raise ValueError(f'Invalid section: {args.section}')
+
 Parallel(n_jobs=n_jobs, backend="loky")(
     delayed(process_chrom)(ch)
-    for ch in tqdm(chromosomes[9:11])
+    for ch in tqdm(chromosomes)
 )
 
 print('Final data preparation complete.')

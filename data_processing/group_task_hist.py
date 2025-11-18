@@ -121,7 +121,5 @@ for p in prefixes:
     print(f"{p}: mean={stats[p]['mean']:.4f}, std={stats[p]['std']:.4f}, count={stats[p]['count']}")
 
 '''
-aln: mean=1.6112, std=90.6698, count=526054477
-pv: mean=2.9956, std=48.2432, count=22951717258
-fc: mean=1.1778, std=3.3032, count=21790697976
+
 '''
