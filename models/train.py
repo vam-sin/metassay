@@ -1,6 +1,4 @@
 # libraries
-import pandas as pd 
-import numpy as np
 import torch
 import json
 import lightning as L
@@ -39,12 +37,12 @@ if __name__ == '__main__':
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--num_epochs', type=int, default=100)
-    parser.add_argument('--bs', type=int, default=64)
+    parser.add_argument('--bs', type=int, default=4)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--n_jobs_load', type=int, default=32, help='Number of parallel jobs for loading and processing data')
     parser.add_argument('--dropout_val', type=float, default=0.1)
-    parser.add_argument('--num_workers', type=int, default=0)
-    parser.add_argument('--scheduler_type', type=str, default='warm_restarts', choices=['cosine', 'cosine_warmup', 'warm_restarts'], help='Scheduler type to use')
+    parser.add_argument('--num_workers', type=int, default=8)
+    parser.add_argument('--scheduler_type', type=str, default='lronplateau', choices=['cosine', 'cosine_warmup', 'warm_restarts', 'lronplateau'], help='Scheduler type to use')
     parser.add_argument('--dataset_downsampling', type=float, default=1.0, help='Fraction of dataset to use (default: 1.0, use 0.5 for half the dataset)')
     parser.add_argument('--model_type', type=str, default='unet', choices=['unet', 'chrombpnet', 'resnet'], 
                         help='Model type to use: unet, chrombpnet, or resnet')
@@ -55,20 +53,36 @@ if __name__ == '__main__':
     parser.add_argument('--conv_kernel_size', type=int, default=3, help='Kernel size for encoder/decoder convs (default: 3)')
     parser.add_argument('--pool_kernel_size', type=int, default=4, help='Kernel size for pooling (default: 4)')
     parser.add_argument('--input_conv_kernel_size', type=int, default=21, help='Kernel size for input conv block (default: 21)')
-    parser.add_argument('--task_specific_conv_kernel_size', type=int, default=5, help='Kernel size for task-specific convs (default: 5)')
+    parser.add_argument('--task_specific_output_binary', action='store_true', help='Enable task-specific output convolutions')
+    parser.add_argument('--task_specific_conv_kernel_size', type=int, default=1, help='Kernel size for task-specific convs (default: 1)')
+    parser.add_argument('--data_size', type=str, default='full', choices=['full', 'downsampled'], help='Dataset size to use: full or downsampled')
     args = parser.parse_args()
 
     # reproducibility
     L.seed_everything(42)
 
-    # load dataset
-    train_ds = ChromDS(['_chr1_', '_chr2_', '_chr3_', '_chr4_', '_chr5_', '_chr6_', '_chr7_', '_chr8_', '_chr9_', '_chr10_', '_chr11_', '_chr12_', '_chr13_', '_chr14_', '_chr15_', '_chr16_'], 
-                       n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/cache_dir',
-                       reverse_compl=args.reverse_compl, dataset_downsampling=args.dataset_downsampling)
-    val_ds = ChromDS(['_chr17_', '_chr18_', '_chr19_'], n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/cache_dir',
-                     reverse_compl=False, dataset_downsampling=args.dataset_downsampling)
-    test_ds = ChromDS(['_chr20_', '_chr21_', '_chr22_'], n_jobs_load=args.n_jobs_load, data_cache_dir='../data_processing/encode_dataset/final_3k/cache_dir',
-                       reverse_compl=False, dataset_downsampling=args.dataset_downsampling)
+    if args.data_size == 'full':
+        data_cache_dir = '../data_processing/encode_dataset/final_3k/cache_dir'
+        section = None
+        # load dataset
+        train_ds = ChromDS(['_chr1_', '_chr2_', '_chr3_', '_chr4_', '_chr5_', '_chr6_', '_chr7_', '_chr8_', '_chr9_', '_chr10_', '_chr11_', '_chr12_', '_chr13_', '_chr14_', '_chr15_', '_chr16_'], 
+                        n_jobs_load=args.n_jobs_load, data_cache_dir=data_cache_dir,
+                        reverse_compl=args.reverse_compl, dataset_downsampling=args.dataset_downsampling, section=section)
+        val_ds = ChromDS(['_chr17_', '_chr18_', '_chr19_'], n_jobs_load=args.n_jobs_load, data_cache_dir=data_cache_dir,
+                        reverse_compl=False, dataset_downsampling=args.dataset_downsampling, section=section)
+        test_ds = ChromDS(['_chr20_', '_chr21_', '_chr22_'], n_jobs_load=args.n_jobs_load, data_cache_dir=data_cache_dir,
+                        reverse_compl=False, dataset_downsampling=args.dataset_downsampling, section=section)
+        
+    elif args.data_size == 'downsampled':
+        data_cache_dir = 'data'
+        # load dataset
+        train_ds = ChromDS(['_chr1_', '_chr2_', '_chr3_', '_chr4_', '_chr5_', '_chr6_', '_chr7_', '_chr8_', '_chr9_', '_chr10_', '_chr11_', '_chr12_', '_chr13_', '_chr14_', '_chr15_', '_chr16_'], 
+                        n_jobs_load=args.n_jobs_load, data_cache_dir=data_cache_dir,
+                        reverse_compl=args.reverse_compl, dataset_downsampling=args.dataset_downsampling, section='train')
+        val_ds = ChromDS(['_chr17_', '_chr18_', '_chr19_'], n_jobs_load=args.n_jobs_load, data_cache_dir=data_cache_dir,
+                        reverse_compl=False, dataset_downsampling=args.dataset_downsampling, section='val')
+        test_ds = ChromDS(['_chr20_', '_chr21_', '_chr22_'], n_jobs_load=args.n_jobs_load, data_cache_dir=data_cache_dir,
+                        reverse_compl=False, dataset_downsampling=args.dataset_downsampling, section='test')
 
     print(f'Train: {len(train_ds)}, Test: {len(test_ds)}, Val: {len(val_ds)}')
 
@@ -121,7 +135,8 @@ if __name__ == '__main__':
             'conv_kernel_size': args.conv_kernel_size,
             'pool_kernel_size': args.pool_kernel_size,
             'input_conv_kernel_size': args.input_conv_kernel_size,
-            'task_specific_conv_kernel_size': args.task_specific_conv_kernel_size
+            'task_specific_conv_kernel_size': args.task_specific_conv_kernel_size,
+            'task_specific_output_binary': args.task_specific_output_binary
         })
     logger = L.pytorch.loggers.WandbLogger(
         project='metassay',

@@ -215,7 +215,7 @@ def _load_and_process_file(file_path, folder, task_names, i_s, o_s, tc, hc):
         return []
 
 class ChromDS(Dataset):
-    def __init__(self, chroms_list, input_size=2048, output_size=1024, reverse_compl=False, random_shift=False, n_jobs_load=16, data_cache_dir=None, dataset_downsampling=1.0):
+    def __init__(self, chroms_list, input_size=2048, output_size=1024, reverse_compl=False, random_shift=False, n_jobs_load=16, data_cache_dir=None, dataset_downsampling=1.0, section=None):
         """
         In-memory dataset that loads and pre-processes all data during initialization.
         
@@ -272,12 +272,15 @@ class ChromDS(Dataset):
         # Check for cached processed data
         cache_file = None
         if data_cache_dir is not None:
-            os.makedirs(data_cache_dir, exist_ok=True)
-            cache_key = hashlib.md5(
-                (str(sorted(self.files_ds)) + str(input_size) + str(output_size) + 
-                 str(self.reverse_compl) + str(self.random_shift) + str(dataset_downsampling)).encode()
-            ).hexdigest()
-            cache_file = os.path.join(data_cache_dir, f'data_{cache_key}.npz')
+            if section is not None:
+                cache_file = os.path.join(data_cache_dir, f'data_{section}.npz')
+            else:
+                os.makedirs(data_cache_dir, exist_ok=True)
+                cache_key = hashlib.md5(
+                    (str(sorted(self.files_ds)) + str(input_size) + str(output_size) + 
+                    str(self.reverse_compl) + str(self.random_shift) + str(dataset_downsampling)).encode()
+                ).hexdigest()
+                cache_file = os.path.join(data_cache_dir, f'data_{cache_key}.npz')
             
             if os.path.exists(cache_file):
                 print(f"Loading cached processed data from {cache_file}...")
@@ -553,6 +556,7 @@ class Model(L.LightningModule):
                  # UNet-specific args
                  num_blocks=4, base_channels=64, conv_kernel_size=3, pool_kernel_size=2,
                  input_conv_kernel_size=21, task_specific_conv_kernel_size=5,
+                 task_specific_output_binary=True,
                  # ChromBPNet-specific args
                  filters=64, n_dil_layers=8, conv1_kernel_size=21, profile_kernel_size=75):
         super().__init__()
@@ -585,7 +589,8 @@ class Model(L.LightningModule):
                                    conv_kernel_size=conv_kernel_size,
                                    pool_kernel_size=pool_kernel_size,
                                    input_conv_kernel_size=input_conv_kernel_size,
-                                   task_specific_conv_kernel_size=task_specific_conv_kernel_size)
+                                   task_specific_conv_kernel_size=task_specific_conv_kernel_size,
+                                   task_specific_output_binary=task_specific_output_binary)
         elif model_type == 'chrombpnet':
             build_chrombpnet_architecture(self, dropout_val, filters, n_dil_layers, conv1_kernel_size, profile_kernel_size)
         elif model_type == 'resnet':
@@ -643,6 +648,8 @@ class Model(L.LightningModule):
                 warmup_start_lr=self.min_lr,
                 gamma=self.gamma
             )
+        elif self.scheduler_type == 'lronplateau':
+            scheduler = {'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer), 'monitor': 'eval/loss'}
         else:
             scheduler = None
         
@@ -695,6 +702,13 @@ class Model(L.LightningModule):
             y_true_all = torch.cat(self._val_targets, dim=0)
             mask_all = torch.cat(self._val_masks, dim=0)
             
+            # Compute average loss and PCC for printing
+            avg_loss = self.loss(y_pred_all, y_true_all, mask_all).item()
+            avg_pcc = self.pcc_metric(y_pred_all, y_true_all, mask_all).item()
+            
+            # Print average metrics
+            print(f"\n[Validation Epoch {self.current_epoch}] Avg Loss: {avg_loss:.4f}, Avg PCC: {avg_pcc:.4f}")
+            
             # Compute task-wise metrics (exclude individual tasks for validation)
             task_metrics = compute_task_wise_metrics(y_pred_all, y_true_all, mask_all, include_individual_tasks=False)
             
@@ -743,6 +757,13 @@ class Model(L.LightningModule):
             y_true_all = torch.cat(self._test_targets, dim=0)
             mask_all = torch.cat(self._test_masks, dim=0)
             
+            # Compute average loss and PCC for printing
+            avg_loss = self.loss(y_pred_all, y_true_all, mask_all).item()
+            avg_pcc = self.pcc_metric(y_pred_all, y_true_all, mask_all).item()
+            
+            # Print average metrics
+            print(f"\n[Test] Avg Loss: {avg_loss:.4f}, Avg PCC: {avg_pcc:.4f}")
+            
             # Compute task-wise metrics
             task_metrics = compute_task_wise_metrics(y_pred_all, y_true_all, mask_all)
             
@@ -766,6 +787,7 @@ def train_model(model_type='unet', num_epochs=50, bs=64, lr=5e-4, save_loc=None,
                 # UNet-specific
                 num_blocks=4, base_channels=64, conv_kernel_size=3, pool_kernel_size=2,
                 input_conv_kernel_size=21, task_specific_conv_kernel_size=5,
+                task_specific_output_binary=True,
                 # ChromBPNet-specific
                 filters=64, n_dil_layers=8, conv1_kernel_size=21, profile_kernel_size=75):
     """
@@ -789,7 +811,7 @@ def train_model(model_type='unet', num_epochs=50, bs=64, lr=5e-4, save_loc=None,
                 monitor='eval/loss',
                 save_top_k=2),
             L.pytorch.callbacks.LearningRateMonitor("epoch"),
-            L.pytorch.callbacks.EarlyStopping(monitor="eval/loss", patience=15),
+            L.pytorch.callbacks.EarlyStopping(monitor="eval/loss", patience=30),
         ],
     )
     trainer.logger._log_graph = False
@@ -820,7 +842,8 @@ def train_model(model_type='unet', num_epochs=50, bs=64, lr=5e-4, save_loc=None,
         conv_kernel_size=conv_kernel_size,
         pool_kernel_size=pool_kernel_size,
         input_conv_kernel_size=input_conv_kernel_size,
-        task_specific_conv_kernel_size=task_specific_conv_kernel_size
+        task_specific_conv_kernel_size=task_specific_conv_kernel_size,
+        task_specific_output_binary=task_specific_output_binary
     )
     pytorch_total_params = sum(p.numel() for p in model.parameters())
     print(f"Total {model_type.upper()} parameters: {pytorch_total_params:,}")

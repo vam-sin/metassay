@@ -60,7 +60,7 @@ def crop_center(x, target_length):
 
 def build_unet_architecture(model, dropout_val, num_blocks=4, base_channels=64, 
                             conv_kernel_size=3, pool_kernel_size=2, input_conv_kernel_size=21,
-                            task_specific_conv_kernel_size=5):
+                            task_specific_conv_kernel_size=5, task_specific_output_binary=True):
     """
     Build UNet architecture components on the model instance.
     
@@ -72,11 +72,14 @@ def build_unet_architecture(model, dropout_val, num_blocks=4, base_channels=64,
         pool_kernel_size: Kernel size for pooling (default: 2)
         input_conv_kernel_size: Kernel size for input conv block (default: 21)
         task_specific_conv_kernel_size: Kernel size for task-specific convs (default: 5)
+        task_specific_output_binary: If True, use task-specific convolutions (one per task).
+                                     If False, use single output_conv that outputs 167 channels directly.
     """
     model.num_blocks = num_blocks
     model.base_channels = base_channels
     model.conv_kernel_size = conv_kernel_size
     model.pool_kernel_size = pool_kernel_size
+    model.task_specific_output_binary = task_specific_output_binary
     
     # Input convolution block with large kernel
     input_padding = (input_conv_kernel_size - 1) // 2
@@ -161,18 +164,27 @@ def build_unet_architecture(model, dropout_val, num_blocks=4, base_channels=64,
         
         in_channels = out_channels
     
-    # Task-specific 1D convolutions - one conv per task, each outputs 1 channel
-    model.task_specific_convs = nn.ModuleList()
-    task_padding = (task_specific_conv_kernel_size - 1) // 2
-    for _ in range(167):  # One conv per task
-        task_conv = nn.Sequential(
-            nn.Conv1d(in_channels, in_channels, kernel_size=task_specific_conv_kernel_size, padding=task_padding),
-            nn.BatchNorm1d(in_channels),
-            nn.ReLU(),
-            nn.Dropout(dropout_val * 0.5),
-            nn.Conv1d(in_channels, 1, kernel_size=1)  # Output 1 channel per task
+    # Output layer: either task-specific convolutions or single output conv
+    if task_specific_output_binary:
+        # Task-specific 1D convolutions - one conv per task, each outputs 1 channel
+        model.task_specific_convs = nn.ModuleList()
+        task_padding = (task_specific_conv_kernel_size - 1) // 2
+        for _ in range(167):  # One conv per task
+            task_conv = nn.Sequential(
+                nn.Conv1d(in_channels, in_channels, kernel_size=task_specific_conv_kernel_size, padding=task_padding),
+                nn.BatchNorm1d(in_channels),
+                nn.ReLU(),
+                nn.Dropout(dropout_val * 0.5),
+                nn.Conv1d(in_channels, 1, kernel_size=1)  # Output 1 channel per task
+            )
+            model.task_specific_convs.append(task_conv)
+        model.output_conv = None  # Not used in this mode
+    else:
+        # Single output convolution that outputs 167 channels directly
+        model.output_conv = nn.Sequential(
+            nn.Conv1d(in_channels, 167, kernel_size=1),  # Direct output to 167 channels
         )
-        model.task_specific_convs.append(task_conv)
+        model.task_specific_convs = None  # Not used in this mode
 
 
 def build_chrombpnet_architecture(model, dropout_val, filters, n_dil_layers, conv1_kernel_size, profile_kernel_size):
@@ -274,14 +286,20 @@ def forward_unet(model, x):
         x = torch.cat([x, skip_connection], dim=1)  # Skip connection
         x = dec(x)
     
-    # Task-specific convolutions - each outputs 1 channel
-    task_outputs = []
-    for task_conv in model.task_specific_convs:
-        task_out = task_conv(x)  # [B, 1, L]
-        task_outputs.append(task_out.squeeze(1))  # [B, L]
-    
-    # Stack task outputs: [B, L] for each task -> [B, num_tasks, L]
-    out = torch.stack(task_outputs, dim=1)  # [B, num_tasks, L]
+    # Output layer: either task-specific convolutions or single output conv
+    if model.task_specific_output_binary:
+        # Task-specific convolutions - each outputs 1 channel
+        task_outputs = []
+        for task_conv in model.task_specific_convs:
+            task_out = task_conv(x)  # [B, 1, L]
+            task_outputs.append(task_out.squeeze(1))  # [B, L]
+        
+        # Stack task outputs: [B, L] for each task -> [B, num_tasks, L]
+        out = torch.stack(task_outputs, dim=1)  # [B, num_tasks, L]
+    else:
+        # Single output conv - directly outputs 167 channels
+        # output_conv outputs [B, 167, L] which is already [B, num_tasks, L] format
+        out = model.output_conv(x)  # [B, 167, L]
     
     # Crop to center 1024 to match output shape
     target_length = 1024
